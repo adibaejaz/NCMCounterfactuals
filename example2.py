@@ -240,19 +240,11 @@ for graph in graph_set:
         for i in range(args.n_trials):
             while True:
                 gen_cg_file = "dat/cg/{}.cg" .format(graph)
-                ncm_cg_file = "dat/cg/{}.cg" .format("frontdoor")
+                ncm_cg_file = "dat/cg/{}.cg" .format("backdoor")
                 try:
-                    if query_choice is None and pipeline_choice:
+                    if pipeline_choice:
                         runner = NCMRunner(pipeline, dat_model, ncm_model)
-                        # if not runner.run(args.name, cg_file, n, d, i,
-                        #                   hyperparams=hyperparams, gpu=gpu_used, verbose=args.verbose):
-                        #     break
                         if not runner.run_score(args.name, gen_cg_file, ncm_cg_file, n, d, i,
-                                          hyperparams=hyperparams, gpu=gpu_used, verbose=args.verbose):
-                            break
-                    else:
-                        runner = NCMMinMaxRunner(pipeline, dat_model, ncm_model)
-                        if not runner.run("{}/{}".format(args.name, graph), gen_cg_file, n, d, i,
                                           hyperparams=hyperparams, gpu=gpu_used, verbose=args.verbose):
                             break
                 except Exception as e:
