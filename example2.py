@@ -1,3 +1,9 @@
+""" This file mimics the structure of main.py, but only trains a baseline NCM to maximize the likelihood of the data.
+Run it as follows.
+python -m example2 score gan --lr 2e-5 --data-bs 256 --ncm-bs 256 --h-size 64 --u-size 2 --layer-norm --gan-mode wgangp --d-iters 1 -r 4 --id-query ate --max-lambda 1e-4 --min-lambda 1e-5 --max-query-iters 1000 --single-disc --gen-sigmoid --mc-sample-size 256 -G three -t 1 -n 1000 -d 1 --gpu 0
+
+"""
+
 import itertools
 import os
 import sys
@@ -40,7 +46,7 @@ valid_graphs = {"backdoor", "bow", "frontdoor", "napkin", "simple", "bdm", "med"
                 "zid_a", "zid_b", "zid_c",
                 "gid_a", "gid_b", "gid_c", "gid_d",
                 "med_c1", "med_c2",
-                "expl_xm", "expl_xm_dox", "expl_xy", "expl_dox", "expl_xy_dox", "expl_my", "expl_my_dox"}
+                "expl_xm", "expl_xm_dox", "expl_xy", "expl_dox", "expl_xy_dox", "expl_my", "expl_my_dox", "three_indep"}
 
 graph_sets = {
     "all": {"backdoor", "bow", "frontdoor", "napkin", "simple", "med", "expl", "zid_a", "zid_b", "zid_c",
@@ -237,16 +243,23 @@ for graph in graph_set:
             hyperparams["data-bs"] = n
             hyperparams["ncm-bs"] = n
 
+        print("num trial:", args.n_trials)
         for i in range(args.n_trials):
+            print("ON TRIAL", i)
             while True:
                 gen_cg_file = "dat/cg/{}.cg" .format(graph)
-                ncm_cg_file = "dat/cg/{}.cg" .format("backdoor")
+                ncm_cg_file_1 = "dat/cg/{}.cg" .format("three_indep")
+                ncm_cg_file_2 = "dat/cg/{}.cg" .format("backdoor")
+                ncm_cg_file_3 = "dat/cg/{}.cg" .format("frontdoor")
+                ncm_cg_files = [ncm_cg_file_1, ncm_cg_file_2, ncm_cg_file_3]
+
                 try:
                     if pipeline_choice:
                         runner = NCMRunner(pipeline, dat_model, ncm_model)
-                        if not runner.run_score(args.name, gen_cg_file, ncm_cg_file, n, d, i,
+                        if not runner.run_score(args.name, gen_cg_file, ncm_cg_files, n, d, i,
                                           hyperparams=hyperparams, gpu=gpu_used, verbose=args.verbose):
                             break
+
                 except Exception as e:
                     print(e)
                     print('[failed]', i, args.name)

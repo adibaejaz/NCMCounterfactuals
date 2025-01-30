@@ -18,7 +18,7 @@ def log(x):
 
 class GANPipeline(BasePipeline):
     patience = 500
-    max_epochs = 3000
+    max_epochs = 100
 
     def __init__(self, generator, do_var_list, dat_sets, cg, dim, hyperparams=None, ncm_model=GAN_NCM, max_query=None):
         """
@@ -26,6 +26,8 @@ class GANPipeline(BasePipeline):
         """
         if hyperparams is None:
             hyperparams = dict()
+
+        print("INITIALIZED GAN PIPELINE")
 
         v_size = {k: 1 if k in {'X', 'Y', 'M', 'W'} else dim for k in cg}
         ncm = ncm_model(cg, v_size=v_size, default_u_size=hyperparams.get('u-size', 1), hyperparams=hyperparams,
@@ -177,6 +179,7 @@ class GANPipeline(BasePipeline):
 
         q_loss_record = 0
         if self.max_query is not None:
+            print("self.max query is not none, adding q-loss")
             q_loss = max_reg * (len(self.do_var_list) ** 2) * self._get_q_loss()
             q_loss_record = q_loss.item()
             if not T.isnan(q_loss):
