@@ -26,7 +26,7 @@ class BasePipeline(pl.LightningModule):
 
     def train_dataloader(self):
         return DataLoader(SCMDataset(self.dat_sets),
-            batch_size=self.batch_size, shuffle=True, drop_last=True)
+            batch_size=self.batch_size, shuffle=True, drop_last=True, num_workers=224)
 
     def update_metrics(self, new_metrics):
         self.stored_metrics = new_metrics

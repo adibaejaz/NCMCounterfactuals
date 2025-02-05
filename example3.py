@@ -1,7 +1,7 @@
-""" This file mimics the structure of main.py, but only trains a baseline NCM to maximize the likelihood of the data.
+""" This file mimics the structure of main.py, but only trains a baseline NCM to maximize the likelihood of the data, with 10 samples for each (true_graph, test_graph) pair.
 Run it as follows.
-python -m example2 score gan --lr 2e-5 --data-bs 256 --ncm-bs 256 --h-size 64 --u-size 2 --layer-norm --gan-mode wgangp --d-iters 1 -r 4 --id-query ate --max-lambda 1e-4 --min-lambda 1e-5 --max-query-iters 1000 --single-disc --gen-sigmoid --mc-sample-size 256 -G three -t 1 -n 1000 -d 1 --gpu 0
-
+python -m example3 score gan --lr 2e-5 --data-bs 256 --ncm-bs 256 --h-size 64 --u-size 2 --layer-norm --gan-mode wgangp --d-iters 1 -r 4 --id-query ate --max-lambda 1e-4 --min-lambda 1e-5 --max-query-iters 1000 --single-disc --gen-sigmoid --mc-sample-size 256 -G backdoor -t 10 -n 10000 -d 1 --gpu 0
+Make sure nmax_epochs in gan_pipeline.py is set to an appropriate value.
 """
 
 import itertools
@@ -48,8 +48,8 @@ valid_graphs = {"backdoor", "bow", "frontdoor", "napkin", "simple", "bdm", "med"
                 "med_c1", "med_c2",
                 "expl_xm", "expl_xm_dox", "expl_xy", "expl_dox", "expl_xy_dox", "expl_my", "expl_my_dox", "three_indep",
                 "iv", "verma", "verma_equiv_1", "verma_equiv_2", "four_dag", "four_unconst", "four_indep"}
-three_node_graphs = ["three_indep", "iv",  "backdoor"]
-four_node_graphs = ["four_indep", "verma", "four_unconst"]
+three_node_graphs = ["three_indep", "iv", "iv_equiv", "backdoor", "frontdoor", "three_unconst"]
+four_node_graphs = ["four_indep", "verma", "verma_equiv_1", "verma_equiv_2", "four_dag", "four_unconst"]
 
 
 graph_sets = {
@@ -144,7 +144,8 @@ pipeline = valid_pipelines[pipeline_choice]
 dat_model = valid_generators[gen_choice]
 ncm_model = architectures[pipeline_choice]
 
-gpu_used = 0 if args.gpu is None else [int(args.gpu)]
+#gpu_used = 0 if args.gpu is None else [int(args.gpu)]
+gpu_used = [0]
 
 
 arg_data_bs = args.data_bs
@@ -247,23 +248,34 @@ for graph in graph_set:
             hyperparams["data-bs"] = n
             hyperparams["ncm-bs"] = n
 
-        three_node_files = ["dat/cg/{}.cg" .format(graph) for graph in three_node_graphs]
-        four_node_files = ["dat/cg/{}.cg" .format(graph) for graph in four_node_graphs]
+        three_node_files = ["dat/cg/{}.cg".format(graph) for graph in three_node_graphs]
+        four_node_files = ["dat/cg/{}.cg".format(graph) for graph in four_node_graphs]
 
+        original_stdout = sys.stdout
 
-        for i in range(args.n_trials):
-            print("ON TRIAL", i)
-            print("GROUND TRUTH GRAPH", graph)
-            while True:
-                try:
-                    gen_cg_file = "dat/cg/{}.cg" .format(graph)
+        print("THREE NODE GRAPHS")
+        for tn_graph in three_node_graphs:
+            gen_cg_file = "dat/cg/{}.cg".format(tn_graph)
+            with open("output_ground_truth_{}".format(tn_graph), 'w') as f:
+                sys.stdout = f
+                print("---- DATA GENERATED FROM ---- ", tn_graph)
+                for i in range(args.n_trials):
+                    print("ON TRIAL", i)
+                    runner = NCMRunner(pipeline, dat_model, ncm_model)
+                    runner.run_score(args.name, gen_cg_file, three_node_files, n, d, i,
+                                    hyperparams=hyperparams, gpu=gpu_used, verbose=args.verbose)
+                sys.stdout = original_stdout
+
+        print("FOUR NODE GRAPHS")
+        for fn_graph in four_node_graphs:
+            gen_cg_file = "dat/cg/{}.cg".format(fn_graph)
+            with open("output_ground_truth_{}.txt".format(fn_graph), 'w') as f:
+                sys.stdout = f
+                print("---- DATA GENERATED FROM ---- ",fn_graph)
+                for i in range(args.n_trials):
+                    print("ON TRIAL", i)
                     print("---- DATA GENERATED FROM ---- ", gen_cg_file)
                     runner = NCMRunner(pipeline, dat_model, ncm_model)
-                    if not runner.run_score(args.name, gen_cg_file, three_node_files, n, d, i,
-                                    hyperparams=hyperparams, gpu=gpu_used, verbose=args.verbose):
-                        break
-
-                except Exception as e:
-                    print(e)
-                    print('[failed]', i, args.name)
-                    raise
+                    runner.run_score(args.name, gen_cg_file, four_node_files, n, d, i,
+                                    hyperparams=hyperparams, gpu=gpu_used, verbose=args.verbose)
+                sys.stdout = original_stdout

@@ -18,7 +18,7 @@ def log(x):
 
 class GANPipeline(BasePipeline):
     patience = 500
-    max_epochs = 100
+    max_epochs = 2000
 
     def __init__(self, generator, do_var_list, dat_sets, cg, dim, hyperparams=None, ncm_model=GAN_NCM, max_query=None):
         """
@@ -198,7 +198,7 @@ class GANPipeline(BasePipeline):
                 results = all_metrics(self.generator, self.ncm, self.do_var_list, self.dat_sets,
                                       n=100000, stored=self.stored_metrics, query_track=self.query_track)
                 for k, v in results.items():
-                    self.log(k, v)
+                     self.log(k, v)
 
                 print(pd.Series(results))
                 print("\nLambda: {}".format(max_reg))
