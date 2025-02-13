@@ -9,7 +9,7 @@ import os
 import warnings
 import argparse
 from src.ds import CTF
-import multiprocessing
+import concurrent.futures
 
 import numpy as np
 import torch as T
@@ -27,34 +27,40 @@ four_node_graphs = ["four_indep", "verma", "verma_equiv_1", "verma_equiv_2", "fo
 
 candidate_graphs = three_node_graphs
 num_trials = 10 
-
+num_samples = 10000
+dim = 1
+gpu = [0,1,2,3,4,5,6,7]
 pipeline = GANPipeline
 dat_model = CTM
 ncm_model = GAN_NCM
+
+# For large-scale experiments
+# Prompt  
+# python -m example3 score gan --lr 2e-5 --data-bs 256 --ncm-bs 256 --h-size 64 --u-size 2 --layer-norm --gan-mode wgangp --d-iters 1 -r 4 --id-query ate --max-lambda 1e-4 --min-lambda 1e-5 --max-query-iters 1000 --single-disc --gen-sigmoid --mc-sample-size 256 -G backdoor -t 10 -n 10000 -d 1 --gpu 0
 hyperparams = {
-    'lr': 4e-3,
-    'data-bs': 100,
-    'ncm-bs': 100,
+    'lr': 2e-5,
+    'data-bs': 256,
+    'ncm-bs': 256,
     'h-layers': 2,
     'h-size': 64,
-    'u-size': 1,
+    'u-size': 2,
     'neural-pu': False,
-    'layer-norm': False,
+    'layer-norm': True,
     'regions': 20,
     'c2-scale': 1.0,
-    'gen-bs': 100,
-    'gan-mode': 'vanilla',
+    'gen-bs': 10000,
+    'gan-mode': 'wganp',
     'd-iters': 1,
     'grad-clamp': 0.01,
     'gp-weight': 10.0,
     'query-track': None,
-    'id-reruns': 1,
-    'max-query-iters': 200,
-    'min-lambda': 0.001,
-    'max-lambda': 1.0,
-    'mc-sample-size': 100,
-    'single-disc': False,
-    'gen-sigmoid': False,
+    'id-reruns': 4,
+    'max-query-iters': 1000,
+    'min-lambda': 1e-5,
+    'max-lambda': 1e-4,
+    'mc-sample-size': 256,
+    'single-disc': True,
+    'gen-sigmoid': True,
     'perturb-sd': 0.1,
     'full-batch': False,
     'positivity': True,
@@ -64,11 +70,20 @@ hyperparams = {
 
 runner = ScoreNCMRunner(pipeline, dat_model, ncm_model)
 
-runner.run_score(true_graph="three_indep", test_graphs=["three_indep"], num_samples=100, dim=1, num_trials=1, \
-                 hyperparams=hyperparams, gpu=[0], lockinfo=os.environ.get('SLURM_JOB_ID', ''), verbose=False)
+# GENERATE DATA
+def run_generation(args):
+    true_graph, trial_index = args
+    return runner.generate_data(true_graph, num_samples, dim, trial_index, hyperparams=hyperparams, 
+                                lockinfo=os.environ.get('SLURM_JOB_ID', ''))
 
-"""
-Map for main function
-- Generate data for each ground truth graph, if not found already
-- Run NCMRunner for each ground truth graph, with the given pipeline, generated data, and test graphs
-"""
+# Create argument pairs
+tasks = [(true_graph, trial_index) for true_graph in candidate_graphs for trial_index in range(num_trials)]
+
+# Use ProcessPoolExecutor for parallel execution
+with concurrent.futures.ProcessPoolExecutor() as executor:
+    results = list(executor.map(run_generation, tasks))
+
+# TEST GRAPHS
+
+# runner.run_score(true_graph="three_indep", test_graphs=["three_indep"], num_samples=100, dim=1, num_trials=1, \
+#                  hyperparams=hyperparams, gpu=[0], lockinfo=os.environ.get('SLURM_JOB_ID', ''), verbose=False)

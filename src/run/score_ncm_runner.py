@@ -46,10 +46,10 @@ class ScoreNCMRunner(BaseRunner):
         return f'dat/cg/{graph}.cg'
     
 
-    def generate_data(self, true_graph, num_samples, dim, num_trials, hyperparams=None, \
+    def generate_data(self, true_graph, num_samples, dim, trial_index, hyperparams=None, \
                       lockinfo=os.environ.get('SLURM_JOB_ID', ''), verbose=False):
        
-        key = self.get_key(true_graph, num_samples, dim, num_trials)
+        key = self.get_key(true_graph, num_samples, dim, trial_index)
         data_filepath = 'out/%s/data.th' % key  # name of the data file
         model_filepath = 'out/%s/dat_m.th' % key
 
@@ -134,7 +134,12 @@ class ScoreNCMRunner(BaseRunner):
             key = self.get_key(true_graph, num_samples, dim, num_trials)
             model_dir = 'out/%s/%s/' % (key, test_graph)
 
-            # Initialise pipeiline
+            # Check if best.th already exists
+            if os.path.exists(f'{model_dir}/best.th'):
+                print(f'Model already trained and saved for {key} and {test_graph}')
+                return
+
+            # Initialise pipeline
             cg = CausalGraph.read(self.get_graph_filename(true_graph))
             m = self.pipeline(dat_m, hyperparams["do-var-list"], dat_sets, cg, dim, \
                             hyperparams=hyperparams,
@@ -171,16 +176,17 @@ class ScoreNCMRunner(BaseRunner):
             T.save(m.state_dict(), f'{model_dir}/best.th')
 
         except Exception as e:
-            print(f'Error running score: {e}')
-            return None
+            print(f'Error running score: {e} for {key} and {test_graph}')
+            
 
     def run_score(self, true_graph, test_graphs, num_samples, dim, num_trials, \
                   gpu=None, hyperparams=None, lockinfo=os.environ.get('SLURM_JOB_ID', ''), verbose=False):
         
-        dat_sets, dat_m = self.generate_data(true_graph, num_samples, dim, num_trials, hyperparams, lockinfo, verbose)
-        if dat_sets is None or dat_m is None:
-            raise RuntimeError('Error generating data')
-        
-        for test_graph in test_graphs:
-            self.test_graph(dat_m, dat_sets, true_graph, test_graph, num_samples, dim, num_trials, \
-                            gpu, hyperparams, lockinfo, verbose)
+        for trial_index in range(num_trials):
+            dat_sets, dat_m = self.generate_data(true_graph, num_samples, dim, trial_index, hyperparams, lockinfo, verbose)
+            if dat_sets is None or dat_m is None:
+                raise RuntimeError('Error generating data')
+            
+            for test_graph in test_graphs:
+                self.test_graph(dat_m, dat_sets, true_graph, test_graph, num_samples, dim, num_trials, \
+                                gpu, hyperparams, lockinfo, verbose)            
