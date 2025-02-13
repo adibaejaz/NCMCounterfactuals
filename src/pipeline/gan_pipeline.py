@@ -17,8 +17,8 @@ def log(x):
 
 
 class GANPipeline(BasePipeline):
-    patience = 500
-    max_epochs = 2000
+    patience = 10
+    max_epochs = 5
 
     def __init__(self, generator, do_var_list, dat_sets, cg, dim, hyperparams=None, ncm_model=GAN_NCM, max_query=None):
         """
@@ -26,8 +26,6 @@ class GANPipeline(BasePipeline):
         """
         if hyperparams is None:
             hyperparams = dict()
-
-        print("INITIALIZED GAN PIPELINE")
 
         v_size = {k: 1 if k in {'X', 'Y', 'M', 'W'} else dim for k in cg}
         ncm = ncm_model(cg, v_size=v_size, default_u_size=hyperparams.get('u-size', 1), hyperparams=hyperparams,

@@ -6,6 +6,39 @@ from src.scm.distribution.continuous_distribution import UniformDistribution
 from src.scm.scm import SCM
 from src.ds.causal_graph import CausalGraph
 
+class CTMFunction:
+    def __init__(self, v_pa, u_pa, regions, region_outputs):
+        self.v_pa = v_pa
+        self.u_pa = u_pa
+        self.regions = regions
+        self.region_outputs = region_outputs
+
+    def __call__(self, v_raw, u_raw):
+        v = {k: v.cpu() for (k, v) in v_raw.items()}
+        u = {k: v.cpu() for (k, v) in u_raw.items()}
+
+        u_key = next(iter(u))
+        n = len(u[u_key])
+
+        region_found = T.ones((n, 1), dtype=T.long) * len(self.regions)
+        for i, region in enumerate(self.regions):
+            in_region = T.ones((n, 1), dtype=T.bool)
+            for j, u_name in enumerate(self.u_pa):
+                in_region *= (region[j][0] <= u[u_name]) * (u[u_name] < region[j][1])
+            region_found[in_region] = i
+
+        region_found = T.squeeze(region_found)
+        used_func = self.region_outputs[region_found]
+
+        if len(self.v_pa) == 0:
+            return T.squeeze(used_func, dim=1)
+        else:
+            v_arr = T.cat([v[k] for k in self.v_pa], dim=1).long()
+            v_ind = T.zeros(n, dtype=T.long)
+            for i in range(v_arr.shape[1]):
+                v_ind = 2 * v_ind + v_arr[:, i]
+            return used_func[range(n), v_ind]
+
 
 class CTM(SCM):
     def __init__(self, cg, v_size={}, default_v_size=1, regions=4, c2_scale=1.0, batch_size=None, seed=None):
@@ -24,6 +57,7 @@ class CTM(SCM):
             v=list(cg),
             f={V: self.get_ctm_func(V) for V in cg},
             pu=UniformDistribution(self.cg.c2, self.u_size))
+        
 
     def get_ctm_func(self, V):
         v_pa = sorted(self.cg.pa[V])
@@ -43,33 +77,35 @@ class CTM(SCM):
         region_outputs.append(default_output)
         region_outputs = T.LongTensor(region_outputs)
 
-        def ctm_func(v_raw, u_raw):
-            v = {k: v.cpu() for (k, v) in v_raw.items()}
-            u = {k: v.cpu() for (k, v) in u_raw.items()}
+        return CTMFunction(v_pa, u_pa, regions, region_outputs)
 
-            u_key = next(iter(u))
-            n = len(u[u_key])
+        # def ctm_func(v_raw, u_raw):
+        #     v = {k: v.cpu() for (k, v) in v_raw.items()}
+        #     u = {k: v.cpu() for (k, v) in u_raw.items()}
 
-            region_found = T.ones((n, 1), dtype=T.long) * len(regions)
-            for i, region in enumerate(regions):
-                in_region = T.ones((n, 1), dtype=T.bool)
-                for j, u_name in enumerate(u_pa):
-                    in_region *= (region[j][0] <= u[u_name]) * (u[u_name] < region[j][1])
-                region_found[in_region] = i
+        #     u_key = next(iter(u))
+        #     n = len(u[u_key])
 
-            region_found = T.squeeze(region_found)
-            used_func = region_outputs[region_found]
+        #     region_found = T.ones((n, 1), dtype=T.long) * len(regions)
+        #     for i, region in enumerate(regions):
+        #         in_region = T.ones((n, 1), dtype=T.bool)
+        #         for j, u_name in enumerate(u_pa):
+        #             in_region *= (region[j][0] <= u[u_name]) * (u[u_name] < region[j][1])
+        #         region_found[in_region] = i
 
-            if len(v_pa) == 0:
-                return T.squeeze(used_func, dim=1)
-            else:
-                v_arr = T.cat([v[k] for k in v_pa], dim=1).long()
-                v_ind = T.zeros(n, dtype=T.long)
-                for i in range(v_arr.shape[1]):
-                    v_ind = 2 * v_ind + v_arr[:, i]
-                return used_func[range(n), v_ind]
+        #     region_found = T.squeeze(region_found)
+        #     used_func = region_outputs[region_found]
 
-        return ctm_func
+        #     if len(v_pa) == 0:
+        #         return T.squeeze(used_func, dim=1)
+        #     else:
+        #         v_arr = T.cat([v[k] for k in v_pa], dim=1).long()
+        #         v_ind = T.zeros(n, dtype=T.long)
+        #         for i in range(v_arr.shape[1]):
+        #             v_ind = 2 * v_ind + v_arr[:, i]
+        #         return used_func[range(n), v_ind]
+
+        # return ctm_func
 
     def sample(self, n=None, u=None, do={}, select=None):
         if self.batch_size is None:

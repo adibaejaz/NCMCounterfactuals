@@ -2,7 +2,6 @@ import pytorch_lightning as pl
 import torch as T
 from torch.utils.data import DataLoader, Dataset
 
-
 class BasePipeline(pl.LightningModule):
     min_delta = 1e-6
     patience = 20
@@ -26,7 +25,7 @@ class BasePipeline(pl.LightningModule):
 
     def train_dataloader(self):
         return DataLoader(SCMDataset(self.dat_sets),
-            batch_size=self.batch_size, shuffle=True, drop_last=True, num_workers=224)
+            batch_size=self.batch_size, shuffle=True, drop_last=True)
 
     def update_metrics(self, new_metrics):
         self.stored_metrics = new_metrics
