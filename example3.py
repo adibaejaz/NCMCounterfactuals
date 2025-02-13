@@ -6,7 +6,6 @@ Make sure nmax_epochs in gan_pipeline.py is set to an appropriate value.
 
 import itertools
 import os
-import sys
 import warnings
 import argparse
 from src.ds import CTF
@@ -26,22 +25,16 @@ from src.metric.queries import get_query, get_experimental_variables, is_q_id_in
 
 
 
-def run_graph(true_graph, gpu_id, args, pipeline, dat_model, ncm_model, test_graph_files, n, d, hyperparams, original_stdout):
+def run_graph(true_graph, gpu_id, args, pipeline, dat_model, ncm_model, test_graph_files, n, d, hyperparams):
     gen_cg_file = "dat/cg/{}.cg".format(true_graph)
-    with open("output_ground_truth_{}".format(true_graph), 'w') as f:
-        sys.stdout = f
-        print("---- DATA GENERATED FROM ---- ", true_graph)
-        for i in range(args.n_trials):
-            print("ON TRIAL", i)
-            runner = NCMRunner(pipeline, dat_model, ncm_model)
-            try:
-                runner.run_score(args.name, gen_cg_file, test_graph_files, n, d, i,
-                             hyperparams=hyperparams, gpu=[gpu_id], verbose=args.verbose)
-            except Exception as e:
-                print(e, "ERROR whlie processing ground truth", true_graph, "trial", i)
-        sys.stdout = original_stdout
-
-
+    for i in range(args.n_trials):
+        print("ON TRIAL", i)
+        runner = NCMRunner(pipeline, dat_model, ncm_model)
+        try:
+            runner.run_score(true_graph, args.name, gen_cg_file, test_graph_files, n, d, i,
+                            hyperparams=hyperparams, gpu=[gpu_id], verbose=args.verbose)
+        except Exception as e:
+            print(e, "ERROR while processing ground truth", true_graph, "trial", i)
 
 
 
@@ -274,16 +267,16 @@ for graph in graph_set:
         three_node_files = ["dat/cg/{}.cg".format(graph) for graph in three_node_graphs]
         four_node_files = ["dat/cg/{}.cg".format(graph) for graph in four_node_graphs]
 
-        original_stdout = sys.stdout
 
         num_gpus = T.cuda.device_count()
+        print("num GPUs", num_gpus)
 
         print("THREE NODE GRAPHS")
         processes = []
         for idx, tn_graph in enumerate(three_node_graphs):
             gpu_id = idx % num_gpus  # Assign GPU in a round-robin manner
             p = multiprocessing.Process(target=run_graph, args=(tn_graph, gpu_id, args, pipeline, dat_model, ncm_model, 
-                                                                three_node_files, n, d, hyperparams, original_stdout))
+                                                                three_node_files, n, d, hyperparams))
             processes.append(p)
             p.start()
 
@@ -296,7 +289,7 @@ for graph in graph_set:
         for idx, tn_graph in enumerate(four_node_graphs):
             gpu_id = idx % num_gpus  # Assign GPU in a round-robin manner
             p = multiprocessing.Process(target=run_graph, args=(tn_graph, gpu_id, args, pipeline, dat_model, ncm_model, 
-                                                                four_node_files, n, d, hyperparams, original_stdout))
+                                                                four_node_files, n, d, hyperparams))
             processes.append(p)
             p.start()
 
