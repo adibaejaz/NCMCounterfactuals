@@ -4,23 +4,29 @@ python -m example3 score gan --lr 2e-5 --data-bs 256 --ncm-bs 256 --h-size 64 --
 Make sure nmax_epochs in gan_pipeline.py is set to an appropriate value.
 """
 
-import itertools
+# import itertools
 import os
-import warnings
-import argparse
-from src.ds import CTF
-import concurrent.futures
+# import warnings
+# import argparse
+# from src.ds import CTF
 
-import numpy as np
-import torch as T
+# import numpy as np
+# import torch as T
 
-from src.pipeline import DivergencePipeline, GANPipeline, MLEPipeline
-from src.scm.model_classes import XORModel, RoundModel
+from src.pipeline import GANPipeline
+# from src.pipeline import DivergencePipeline, MLEPipeline
+# from src.scm.model_classes import XORModel, RoundModel
 from src.scm.ctm import CTM
-from src.scm.ncm import FF_NCM, GAN_NCM, MLE_NCM
-from src.run import NCMRunner, NCMMinMaxRunner, ScoreNCMRunner
-from src.ds.causal_graph import CausalGraph
-from src.metric.queries import get_query, get_experimental_variables, is_q_id_in_G
+from src.scm.ncm import GAN_NCM
+# from src.scm.ncm import FF_NCM, MLE_NCM
+from src.run import ScoreNCMRunner
+import argparse
+# from src.run import NCMRunner, NCMMinMaxRunner
+# from src.ds.causal_graph import CausalGraph
+# from src.metric.queries import get_query, get_experimental_variables, is_q_id_in_G
+
+os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+
 
 three_node_graphs = ["three_indep", "iv", "iv_equiv", "backdoor", "frontdoor", "three_unconst"]
 four_node_graphs = ["four_indep", "verma", "verma_equiv_1", "verma_equiv_2", "four_dag", "four_unconst"]
@@ -29,7 +35,11 @@ candidate_graphs = three_node_graphs
 num_trials = 10 
 num_samples = 10000
 dim = 1
-gpu = [0,1,2,3,4,5,6,7]
+parser = argparse.ArgumentParser(description='Process some integers.')
+parser.add_argument('--gpu', type=int, default=0, help='GPU id to use')
+args = parser.parse_args()
+
+gpu = [args.gpu]
 pipeline = GANPipeline
 dat_model = CTM
 ncm_model = GAN_NCM
@@ -49,7 +59,7 @@ hyperparams = {
     'regions': 20,
     'c2-scale': 1.0,
     'gen-bs': 10000,
-    'gan-mode': 'wganp',
+    'gan-mode': 'wgangp',
     'd-iters': 1,
     'grad-clamp': 0.01,
     'gp-weight': 10.0,
@@ -69,21 +79,14 @@ hyperparams = {
 }
 
 runner = ScoreNCMRunner(pipeline, dat_model, ncm_model)
-
-# GENERATE DATA
-def run_generation(args):
-    true_graph, trial_index = args
-    return runner.generate_data(true_graph, num_samples, dim, trial_index, hyperparams=hyperparams, 
-                                lockinfo=os.environ.get('SLURM_JOB_ID', ''))
-
-# Create argument pairs
-tasks = [(true_graph, trial_index) for true_graph in candidate_graphs for trial_index in range(num_trials)]
-
-# Use ProcessPoolExecutor for parallel execution
-with concurrent.futures.ProcessPoolExecutor() as executor:
-    results = list(executor.map(run_generation, tasks))
-
-# TEST GRAPHS
-
-# runner.run_score(true_graph="three_indep", test_graphs=["three_indep"], num_samples=100, dim=1, num_trials=1, \
-#                  hyperparams=hyperparams, gpu=[0], lockinfo=os.environ.get('SLURM_JOB_ID', ''), verbose=False)
+runner.run_score(
+    true_graphs=three_node_graphs,
+    test_graphs=three_node_graphs,
+    num_samples=num_samples,
+    dim=dim,
+    num_trials=num_trials,
+    hyperparams=hyperparams,
+    gpu=gpu,
+    lockinfo=os.environ.get('SLURM_JOB_ID', ''),
+    verbose=False,
+)

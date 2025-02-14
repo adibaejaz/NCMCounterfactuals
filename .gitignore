@@ -130,7 +130,13 @@ dmypy.json
 
 # Output files
 err/
-out/
+checkpoints/
+logs/
+best.th
+hyperparams.json
+lock
 
-
+# Data files
+data.th
+dat_m.th
 .gitignore

@@ -17,8 +17,8 @@ def log(x):
 
 
 class GANPipeline(BasePipeline):
-    patience = 10
-    max_epochs = 5
+    patience = 500
+    max_epochs = 2000
 
     def __init__(self, generator, do_var_list, dat_sets, cg, dim, hyperparams=None, ncm_model=GAN_NCM, max_query=None):
         """
