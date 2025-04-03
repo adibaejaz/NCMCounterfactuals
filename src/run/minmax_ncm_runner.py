@@ -62,6 +62,10 @@ class NCMMinMaxRunner(BaseRunner):
 
         return stored_metrics
 
+    def generate_data(self, exp_name, cg_file, n, dim, trial_index, hyperparams=None, gpu=None,
+            lockinfo=os.environ.get('SLURM_JOB_ID', ''), verbose=False):
+        pass
+
     def run(self, exp_name, cg_file, n, dim, trial_index, hyperparams=None, gpu=None,
             lockinfo=os.environ.get('SLURM_JOB_ID', ''), verbose=False):
         key = self.get_key(cg_file, n, dim, trial_index)
@@ -97,12 +101,16 @@ class NCMMinMaxRunner(BaseRunner):
                     print('Generating data')
                     cg = CausalGraph.read(cg_file)
                     v_sizes = {k: 1 if k in {'X', 'Y', 'M', 'W'} else dim for k in cg}
-                    if self.dat_model is CTM:
+                    print(self.dat_model.__class__)
+                    print(CTM)
+                    print(self.dat_model.__class__ is CTM) 
+                    if self.dat_model.__name__ == CTM.__name__:
                         dat_m = self.dat_model(cg, v_size=v_sizes, regions=hyperparams.get('regions', 20),
                                                c2_scale=hyperparams.get('c2-scale', 1.0),
                                                batch_size=hyperparams.get('gen-bs', 10000),
                                                seed=seed)
                     else:
+                        print("self.dat_model is not CTM")
                         dat_m = self.dat_model(cg, dim=dim, seed=seed)
 
                     # checks if the data has already been generated
