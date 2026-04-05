@@ -18,8 +18,8 @@ def parse_args():
     source_group.add_argument('--synthetic-rows', type=int, default=10000, help="number of synthetic rows to generate")
 
     parser.add_argument('--graph', default='chain', help="PAG structure to use; only 'chain' is supported right now")
-    parser.add_argument('--trial', '--trail', type=int, default=0,
-                        help="trial index used to derive the run seed and output directory")
+    parser.add_argument('--trial', type=int, default=1,
+                        help="number of trials to run; executes trial indices 0 through trial-1")
     parser.add_argument('--num-vars', type=int, default=3, help="number of variables for synthetic data")
     parser.add_argument('--synthetic-seed', type=int, default=0, help="seed for synthetic data generation")
     parser.add_argument('--val-frac', type=float, default=0.1, help="validation split fraction")
@@ -66,7 +66,6 @@ def build_hyperparams(args):
     return {
         'batch-size': args.batch_size,
         'graph': args.graph,
-        'trial': args.trial,
         'lr': args.lr,
         'weight-decay': args.weight_decay,
         'mc-sample-size': args.mc_sample_size,
@@ -90,27 +89,33 @@ def build_hyperparams(args):
     }
 
 
-def get_run_seed(args):
-    return args.seed + args.trial
+def get_trial_indices(args):
+    if args.trial < 1:
+        raise ValueError("--trial must be at least 1.")
+    return range(args.trial)
 
 
-def get_data_seed(args):
-    return args.synthetic_seed + args.trial
+def get_run_seed(args, trial_idx):
+    return args.seed + trial_idx
 
 
-def get_run_name(args):
+def get_data_seed(args, trial_idx):
+    return args.synthetic_seed + trial_idx
+
+
+def get_run_name(args, trial_idx):
     residual_tag = 'noresidual' if args.no_residual else 'residual'
-    return '{}-{}-layers={}-{}'.format(args.graph, args.trial, args.num_layers, residual_tag)
+    return '{}-{}-layers={}-{}'.format(args.graph, trial_idx, args.num_layers, residual_tag)
 
 
-def load_dataset(args):
+def load_dataset(args, trial_idx):
     if args.graph != 'chain':
         raise ValueError("Only graph='chain' is supported right now.")
     if args.validation_depth != 3:
         raise ValueError("The chain PAG validation sampler requires --validation-depth 3.")
     if args.data_path is not None:
         return load_binary_table(args.data_path)
-    return make_synthetic_binary_table(args.synthetic_rows, args.graph, seed=get_data_seed(args))
+    return make_synthetic_binary_table(args.synthetic_rows, args.graph, seed=get_data_seed(args, trial_idx))
 
 
 def make_trainer(output_dir, monitor, max_epochs, patience, gpu, fast_dev_run):
@@ -144,16 +149,16 @@ def make_trainer(output_dir, monitor, max_epochs, patience, gpu, fast_dev_run):
     return pl.Trainer(**trainer_kwargs), checkpoint
 
 
-def main():
-    args = parse_args()
-    run_seed = get_run_seed(args)
+def run_trial(args, trial_idx):
+    run_seed = get_run_seed(args, trial_idx)
+    data_seed = get_data_seed(args, trial_idx)
     pl.seed_everything(run_seed)
 
-    data, variable_names = load_dataset(args)
+    data, variable_names = load_dataset(args, trial_idx)
     train_data, val_data = split_binary_table(data, val_fraction=args.val_frac, seed=run_seed)
     ground_truth_prob_table = binary_table_probability_table(data, variable_names)
 
-    output_dir = os.path.join('out', args.name, get_run_name(args))
+    output_dir = os.path.join('out', args.name, get_run_name(args, trial_idx))
     os.makedirs(output_dir, exist_ok=True)
     T.save({
         'data': data.cpu(),
@@ -161,12 +166,14 @@ def main():
         'val_data': None if val_data is None else val_data.cpu(),
         'columns': variable_names,
         'graph': args.graph,
-        'trial': int(args.trial),
+        'trial': int(trial_idx),
         'seed': int(run_seed),
-        'data_seed': int(get_data_seed(args)),
+        'data_seed': int(data_seed),
     }, os.path.join(output_dir, 'data.pt'))
 
     hyperparams = build_hyperparams(args)
+    hyperparams['trial'] = int(trial_idx)
+    hyperparams['num-trials'] = int(args.trial)
     model = PAGPipeline(
         train_data=train_data,
         val_data=val_data,
@@ -185,11 +192,13 @@ def main():
         fast_dev_run=args.fast_dev_run,
     )
 
+    print("=== Trial {}/{} ===".format(trial_idx, args.trial - 1))
     if args.verbose:
         print("Training rows:", train_data.shape[0])
         print("Validation rows:", 0 if val_data is None else val_data.shape[0])
         print("Variables:", variable_names)
         print("Run seed:", run_seed)
+        print("Data seed:", data_seed)
     print("Ground truth probability table:\n{}".format(ground_truth_prob_table.to_string(index=False)))
 
     trainer.fit(model)
@@ -205,9 +214,10 @@ def main():
         'train_rows': int(train_data.shape[0]),
         'val_rows': 0 if val_data is None else int(val_data.shape[0]),
         'graph': args.graph,
-        'trial': int(args.trial),
+        'trial': int(trial_idx),
+        'num_trials': int(args.trial),
         'seed': int(run_seed),
-        'data_seed': int(get_data_seed(args)),
+        'data_seed': int(data_seed),
         'num_variables': int(train_data.shape[1]),
         'variable_names': variable_names,
         'ground_truth_prob_table': ground_truth_prob_table.to_dict(orient='records'),
@@ -222,6 +232,12 @@ def main():
         json.dump(results, fp, indent=2)
     with open(os.path.join(output_dir, 'hyperparams.json'), 'w') as fp:
         json.dump(hyperparams, fp, indent=2)
+
+
+def main():
+    args = parse_args()
+    for trial_idx in get_trial_indices(args):
+        run_trial(args, trial_idx)
 
 
 if __name__ == '__main__':
