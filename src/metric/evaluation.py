@@ -83,6 +83,103 @@ def serialize_query(query):
     return str(query)
 
 
+def _extract_atomic_query_assignment(query):
+    if not isinstance(query, CTF):
+        raise ValueError("bounds currently require an atomic CTF query.")
+    if len(query.term_set) != 1 or len(query.cond_term_set) != 0:
+        raise ValueError("bounds currently require a single unconditioned atomic query.")
+
+    term = next(iter(query.term_set))
+    if term.vars != {'Y'} or set(term.var_vals.keys()) != {'Y'}:
+        raise ValueError("bounds currently only support queries over Y.")
+    if set(term.do_vals.keys()) != {'X'}:
+        raise ValueError("bounds currently only support interventions on X.")
+
+    return int(term.do_vals['X']), int(term.var_vals['Y'])
+
+
+def _joint_probability(prob_table, assignments):
+    mask = prob_table['P(V)'] >= 0
+    for column, value in assignments.items():
+        if column not in prob_table.columns:
+            raise ValueError("probability table must contain column '{}'.".format(column))
+        mask = mask & (prob_table[column] == value)
+    return float(prob_table.loc[mask, 'P(V)'].sum())
+
+
+def _conditional_yx_given_z(prob_table, y_value, x_value, z_value):
+    p_z = _joint_probability(prob_table, {'Z0': z_value})
+    if p_z <= 0:
+        raise ValueError("probability table has zero mass on Z={}.".format(z_value))
+    p_yxz = _joint_probability(prob_table, {'Y0': y_value, 'X0': x_value, 'Z0': z_value})
+    return p_yxz / p_z
+
+
+def _iv_family_y1_bounds(prob_table, x_value):
+    p_y0x0_z0 = _conditional_yx_given_z(prob_table, 0, 0, 0)
+    p_y0x1_z0 = _conditional_yx_given_z(prob_table, 0, 1, 0)
+    p_y1x0_z0 = _conditional_yx_given_z(prob_table, 1, 0, 0)
+    p_y1x1_z0 = _conditional_yx_given_z(prob_table, 1, 1, 0)
+    p_y0x0_z1 = _conditional_yx_given_z(prob_table, 0, 0, 1)
+    p_y0x1_z1 = _conditional_yx_given_z(prob_table, 0, 1, 1)
+    p_y1x0_z1 = _conditional_yx_given_z(prob_table, 1, 0, 1)
+    p_y1x1_z1 = _conditional_yx_given_z(prob_table, 1, 1, 1)
+
+    if x_value == 0:
+        lower_bound = max(
+            p_y1x0_z1,
+            p_y1x0_z0,
+            p_y1x0_z0 + p_y1x1_z0 - p_y0x0_z1 - p_y1x1_z1,
+            p_y0x1_z0 + p_y1x0_z0 - p_y0x0_z1 - p_y0x1_z1,
+        )
+        upper_bound = min(
+            1.0 - p_y0x0_z1,
+            1.0 - p_y0x0_z0,
+            p_y0x1_z0 + p_y1x0_z0 + p_y1x0_z1 + p_y1x1_z1,
+            p_y1x0_z0 + p_y1x1_z0 + p_y0x1_z1 + p_y1x0_z1,
+        )
+        return lower_bound, upper_bound
+    if x_value == 1:
+        lower_bound = max(
+            p_y1x1_z0,
+            p_y1x1_z1,
+            -p_y0x0_z0 - p_y0x1_z0 + p_y0x0_z1 + p_y1x1_z1,
+            -p_y0x1_z0 - p_y1x0_z0 + p_y1x0_z1 + p_y1x1_z1,
+        )
+        upper_bound = min(
+            1.0 - p_y0x1_z1,
+            1.0 - p_y0x1_z0,
+            p_y0x0_z0 + p_y1x1_z0 + p_y1x0_z1 + p_y1x1_z1,
+            p_y1x0_z0 + p_y1x1_z0 + p_y0x0_z1 + p_y1x1_z1,
+        )
+        return lower_bound, upper_bound
+    raise ValueError("x_value must be binary.")
+
+
+def atomic_query_bounds_from_probability_table(graph_name, query, prob_table):
+    graph_name = graph_name.lower()
+    x_value, y_value = _extract_atomic_query_assignment(query)
+    if 'P(V)' not in prob_table.columns or 'X0' not in prob_table.columns or 'Y0' not in prob_table.columns:
+        raise ValueError("probability table must contain X0, Y0, and P(V) columns.")
+
+    if graph_name == "bow":
+        p_yx = _joint_probability(prob_table, {'X0': x_value, 'Y0': y_value})
+        p_x = _joint_probability(prob_table, {'X0': x_value})
+        lower_bound = p_yx
+        upper_bound = p_yx + 1.0 - p_x
+        return lower_bound, upper_bound
+
+    if graph_name in {"iv", "doublebow", "double_bow"}:
+        if 'Z0' not in prob_table.columns:
+            raise ValueError("probability table must contain Z0 for graph='{}'.".format(graph_name))
+        y1_lower, y1_upper = _iv_family_y1_bounds(prob_table, x_value)
+        if y_value == 1:
+            return y1_lower, y1_upper
+        return 1.0 - y1_upper, 1.0 - y1_lower
+
+    raise ValueError("bounds are currently only implemented for graph='bow', 'iv', and 'doublebow'.")
+
+
 def all_metrics(truth, ncm, dat_dos, dat_sets, n=1000000, stored=None, query_track=None, include_sup=False):
     true_ps = dict()
     dat_ps = dict()

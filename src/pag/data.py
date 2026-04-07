@@ -35,6 +35,24 @@ def _to_binary_tensor(data):
     return tensor
 
 
+def _full_support_probability_table(data, columns):
+    tensor = _to_binary_tensor(data).cpu()
+    _validate_binary_tensor(tensor)
+    if tensor.shape[1] != 3:
+        raise ValueError("Full-support probability table currently expects exactly three variables.")
+
+    combos = T.cartesian_prod(T.tensor([0, 1]), T.tensor([0, 1]), T.tensor([0, 1])).long()
+    combo_ids = combos[:, 0] * 4 + combos[:, 1] * 2 + combos[:, 2]
+    sample_ids = tensor[:, 0].long() * 4 + tensor[:, 1].long() * 2 + tensor[:, 2].long()
+    counts = T.bincount(sample_ids, minlength=8).float()
+    probs = counts / counts.sum()
+
+    df = pd.DataFrame(combos.numpy(), columns=[str(col) for col in columns])
+    df['P(V)'] = probs.numpy()
+    df['_combo_id'] = combo_ids.numpy()
+    return df.sort_values('_combo_id').drop(columns=['_combo_id']).reset_index(drop=True)
+
+
 def _load_pt_like(path):
     loaded = T.load(path)
     if isinstance(loaded, dict):
@@ -86,20 +104,45 @@ def load_binary_table(path):
     return tensor.float(), [str(col) for col in columns]
 
 
-def make_synthetic_binary_table(num_rows, graph_name, seed=0, regions=20, c2_scale=1.0, batch_size=10000):
+def make_synthetic_binary_table(
+    num_rows,
+    graph_name,
+    seed=0,
+    regions=20,
+    c2_scale=1.0,
+    batch_size=10000,
+    min_state_prob=0.01,
+    resample_seed_offset=2026,
+    max_resample_attempts=100,
+):
     if graph_name != 'chain':
         raise ValueError("Only graph='chain' is supported right now.")
+    if min_state_prob < 0.0:
+        raise ValueError("min_state_prob must be non-negative.")
 
     cg_path = os.path.abspath(os.path.join(
         os.path.dirname(__file__), '..', '..', 'dat', 'cg', '{}.cg'.format(graph_name)))
+    columns = ["X", "Y", "Z"]
     cg = CausalGraph.read(cg_path)
     v_sizes = {k: 1 for k in cg}
-    dat_m = CTM(cg, v_size=v_sizes, regions=regions, c2_scale=c2_scale, batch_size=batch_size, seed=seed)
-    observational_samples = dat_m(n=num_rows, do={})
 
-    columns = ["X", "Y", "Z"]
-    samples = T.cat([observational_samples[col].float() for col in columns], dim=1)
-    return samples, columns
+    for attempt in range(max_resample_attempts):
+        cur_seed = seed + attempt * resample_seed_offset
+        dat_m = CTM(cg, v_size=v_sizes, regions=regions, c2_scale=c2_scale, batch_size=batch_size, seed=cur_seed)
+        observational_samples = dat_m(n=num_rows, do={})
+        samples = T.cat([observational_samples[col].float() for col in columns], dim=1)
+
+        if min_state_prob == 0.0:
+            return samples, columns
+
+        prob_table = _full_support_probability_table(samples, columns)
+        if float(prob_table['P(V)'].min()) >= min_state_prob:
+            return samples, columns
+
+    raise RuntimeError(
+        "Failed to generate chain data with all 8 states having probability >= {:.4f} after {} attempts."
+        .format(min_state_prob, max_resample_attempts)
+    )
 
 
 def split_binary_table(data, val_fraction=0.1, seed=0):

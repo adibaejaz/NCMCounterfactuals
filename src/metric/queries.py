@@ -1,6 +1,15 @@
 from src.ds import CTF, CTFTerm, CausalGraph, graph_search
 
 
+valid_atomic_queries = {"y1_dox1", "y0_dox0", "y1_dox0", "y0_dox1"}
+atomic_query_complements = {
+    "y1_dox1": "y0_dox1",
+    "y0_dox1": "y1_dox1",
+    "y1_dox0": "y0_dox0",
+    "y0_dox0": "y1_dox0",
+}
+
+
 def search_var(G: CausalGraph, var_text):
     treatment = set()
     for V in G.set_v:
@@ -132,6 +141,46 @@ def get_query(graph_name, query_name):
         opt_query = [py1med, py0], [py0med, py1]
 
     return eval_query, opt_query
+
+
+def get_atomic_query(graph_name, query_name):
+    G = CausalGraph.read("dat/cg/{}.cg".format(graph_name))
+    query_name = query_name.lower()
+
+    if query_name not in valid_atomic_queries:
+        raise ValueError("unknown atomic query '{}'".format(query_name))
+
+    treatment = search_var(G, 'X')
+    if len(treatment) != 1:
+        raise ValueError(
+            "atomic optimization queries require exactly one treatment variable, got {}".format(
+                sorted(treatment)
+            )
+        )
+
+    treat_dict = {V: 1 for V in treatment}
+    notreat_dict = {V: 0 for V in treatment}
+    query_specs = {
+        "y1_dox1": (treat_dict, {'Y': 1}, "P(Y=1 | do(X=1))"),
+        "y0_dox0": (notreat_dict, {'Y': 0}, "P(Y=0 | do(X=0))"),
+        "y1_dox0": (notreat_dict, {'Y': 1}, "P(Y=1 | do(X=0))"),
+        "y0_dox1": (treat_dict, {'Y': 0}, "P(Y=0 | do(X=1))"),
+    }
+    do_vals, var_vals, name = query_specs[query_name]
+    return CTF({CTFTerm({'Y'}, do_vals, var_vals)}, set(), name=name)
+
+
+def get_atomic_query_complement(graph_name, query_name):
+    query_name = query_name.lower()
+    if query_name not in atomic_query_complements:
+        raise ValueError("unknown atomic query '{}'".format(query_name))
+    return get_atomic_query(graph_name, atomic_query_complements[query_name])
+
+
+def is_atomic_query_in_G(graph_name):
+    G = CausalGraph.read("dat/cg/{}.cg".format(graph_name))
+    treatment = search_var(G, 'X')
+    return len(treatment) == 1
 
 
 def get_experimental_variables(graph_name):

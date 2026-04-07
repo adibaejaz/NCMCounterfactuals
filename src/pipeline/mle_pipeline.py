@@ -13,6 +13,44 @@ from src.ds.counterfactual import CTF
 from .base_pipeline import BasePipeline
 
 
+def _selection_candidate_dominates(candidate_a, candidate_b, mode):
+    if mode == 'max':
+        return (
+            candidate_a['kl'] <= candidate_b['kl']
+            and candidate_a['query'] >= candidate_b['query']
+            and (candidate_a['kl'] < candidate_b['kl'] or candidate_a['query'] > candidate_b['query'])
+        )
+    if mode == 'min':
+        return (
+            candidate_a['kl'] <= candidate_b['kl']
+            and candidate_a['query'] <= candidate_b['query']
+            and (candidate_a['kl'] < candidate_b['kl'] or candidate_a['query'] < candidate_b['query'])
+        )
+    raise ValueError("mode must be 'max' or 'min'.")
+
+
+def _choose_selection_candidate(candidates, best_kl, tolerance, mode):
+    eligible = [candidate for candidate in candidates if candidate['kl'] <= best_kl + tolerance]
+    if not eligible:
+        return None
+    if mode == 'max':
+        return max(eligible, key=lambda candidate: (candidate['query'], -candidate['kl'], -candidate['epoch']))
+    if mode == 'min':
+        return min(eligible, key=lambda candidate: (candidate['query'], candidate['kl'], candidate['epoch']))
+    raise ValueError("mode must be 'max' or 'min'.")
+
+
+def _prune_selection_candidates(candidates, best_kl, tolerance, mode, max_candidates):
+    eligible = [candidate for candidate in candidates if candidate['kl'] <= best_kl + tolerance]
+    if mode == 'max':
+        eligible.sort(key=lambda candidate: (-candidate['query'], candidate['kl'], candidate['epoch']))
+    elif mode == 'min':
+        eligible.sort(key=lambda candidate: (candidate['query'], candidate['kl'], candidate['epoch']))
+    else:
+        raise ValueError("mode must be 'max' or 'min'.")
+    return eligible[:max_candidates]
+
+
 class MLEPipeline(BasePipeline):
     patience = 400
 
@@ -30,6 +68,12 @@ class MLEPipeline(BasePipeline):
             self.max_query = max_query
         self.max_query_iters = hyperparams.get("max-query-iters", 3000)
         self.query_track = hyperparams["eval-query"]
+        self.bound_query = hyperparams.get("bound-query")
+        self.query_lower_bound = hyperparams.get("query-bound-lower")
+        self.query_upper_bound = hyperparams.get("query-bound-upper")
+        self.selection_mode = hyperparams.get("selection-mode")
+        self.selection_kl_tolerance = hyperparams.get("selection-kl-tolerance", 5e-4)
+        self.selection_max_candidates = hyperparams.get("selection-max-candidates", 25)
 
         self.do_var_list = hyperparams["do-var-list"]
 
@@ -51,17 +95,16 @@ class MLEPipeline(BasePipeline):
         self.logged = False
         self.stored_kl = 1e8
         self.automatic_optimization = False
+        self._selection_candidates = []
+        self._best_selection_kl = float('inf')
+        self._selected_candidate = None
 
     def forward(self, n=1000, u=None, do={}):
         return self.ncm(n, u, do)
 
     def configure_optimizers(self):
         optim = T.optim.AdamW(self.ncm.parameters(), lr=self.lr)
-        return {
-            'optimizer': optim,
-            'lr_scheduler': T.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optim, 50, 1, eta_min=1e-4)
-        }
+        return optim
 
     '''
     def _get_data_counts(self, data, n, do_set=None):
@@ -89,6 +132,53 @@ class MLEPipeline(BasePipeline):
             point_key = frozenset(data_point.items())
             counts[point_key] = counts.get(point_key, 0) + 1
         return counts
+
+    def _snapshot_state_dict(self):
+        return {key: value.detach().cpu().clone() for key, value in self.state_dict().items()}
+
+    def _update_online_selection(self, results):
+        if self.selection_mode is None or self.query_track is None:
+            return
+
+        query_key = "ncm_{}".format(evaluation.serialize_query(self.query_track))
+        if query_key not in results or "total_dat_KL" not in results:
+            return
+
+        candidate = {
+            'epoch': int(self.current_epoch),
+            'kl': float(results["total_dat_KL"]),
+            'query': float(results[query_key]),
+            'state_dict': self._snapshot_state_dict(),
+        }
+        self._best_selection_kl = min(self._best_selection_kl, candidate['kl'])
+        self._selection_candidates.append(candidate)
+        self._selection_candidates = _prune_selection_candidates(
+            self._selection_candidates,
+            self._best_selection_kl,
+            self.selection_kl_tolerance,
+            self.selection_mode,
+            self.selection_max_candidates,
+        )
+        self._selected_candidate = _choose_selection_candidate(
+            self._selection_candidates,
+            self._best_selection_kl,
+            self.selection_kl_tolerance,
+            self.selection_mode,
+        )
+
+    def get_selected_state_dict(self):
+        if self._selected_candidate is None:
+            return None
+        return self._selected_candidate['state_dict']
+
+    def get_selected_metrics(self):
+        if self._selected_candidate is None:
+            return None
+        return {
+            'epoch': self._selected_candidate['epoch'],
+            'kl': self._selected_candidate['kl'],
+            'query': self._selected_candidate['query'],
+        }
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
@@ -133,10 +223,19 @@ class MLEPipeline(BasePipeline):
             if not self.logged:
                 results = all_metrics(self.generator, self.ncm, self.do_var_list, self.dat_sets,
                                       n=100000, stored=self.stored_metrics, query_track=self.query_track)
+                if self.bound_query is not None:
+                    bound_query_name = evaluation.serialize_query(self.bound_query)
+                    results["lower_bound_{}".format(bound_query_name)] = self.query_lower_bound
+                    results["upper_bound_{}".format(bound_query_name)] = self.query_upper_bound
+                self._update_online_selection(results)
                 for k, v in results.items():
                     self.log(k, v)
 
                 print(pd.Series(results))
+                if self.bound_query is not None:
+                    print("Bound Query: {}".format(self.bound_query))
+                    print("Lower Bound: {}".format(self.query_lower_bound))
+                    print("Upper Bound: {}".format(self.query_upper_bound))
                 print("\nLambda: {}".format(max_reg))
 
                 self.logged = True

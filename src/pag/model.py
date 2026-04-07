@@ -32,53 +32,186 @@ class SimpleMLP(nn.Module):
         return self.net(x)
 
 
-class MixedChainAttentionMask(nn.Module):
-    def __init__(self, num_heads, seq_len, graph="chain", mask_mode="additive"):
+class LearnableDAGChainAttentionMask(nn.Module):
+    def __init__(
+        self,
+        seq_len,
+        graph="chain",
+        mask_structure="learnable",
+        dagma_s=2.0,
+        hard_mask_value=1e4,
+        init_edge_logit=0,
+        init_edge_logit_std=1.0,
+        adjacency_normalization="none",
+        gate_floor=0.05,
+        gate_renorm_eps=1e-6,
+    ):
         super().__init__()
         if graph != "chain":
             raise ValueError("Only graph='chain' is supported right now.")
         if seq_len != 6:
             raise ValueError("The chain mask only supports three PAG variables X, Y, Z.")
-        if mask_mode not in {"additive", "multiplicative"}:
-            raise ValueError("mask mode must be 'additive' or 'multiplicative'.")
+        if mask_structure not in {"learnable", "fixed-chain"}:
+            raise ValueError("mask_structure must be 'learnable' or 'fixed-chain'.")
+        if adjacency_normalization not in {"none", "sum"}:
+            raise ValueError("adjacency_normalization must be 'none' or 'sum'.")
+        if dagma_s <= 0:
+            raise ValueError("dagma_s must be positive.")
+        if gate_floor < 0 or gate_floor >= 1:
+            raise ValueError("gate_floor must lie in [0, 1).")
+        if gate_renorm_eps <= 0:
+            raise ValueError("gate_renorm_eps must be positive.")
 
-        self.mask_mode = mask_mode
-        self.num_heads = num_heads
+        self.mask_structure = mask_structure
         self.seq_len = seq_len
+        self.dagma_s = dagma_s
+        self.hard_mask_value = hard_mask_value
+        self.adjacency_normalization = adjacency_normalization
+        self.gate_floor = gate_floor
+        self.gate_renorm_eps = gate_renorm_eps
 
         # Token order is fixed as [u_x, u_y, u_z, X, Y, Z].
-        # Reverse chain factorization:
-        # Z depends on u_z
-        # Y depends on (u_y, Z)
-        # X depends on (u_x, Y)
+        # Hard support:
+        # u_x <- {u_x, Y}
+        # u_y <- {u_y, X, Z}
+        # u_z <- {u_z, Y}
+        # X, Y, Z are self-only.
         allow = T.zeros(seq_len, seq_len, dtype=T.bool)
         allow[0, 0] = True
         allow[0, 4] = True
         allow[1, 1] = True
+        allow[1, 3] = True
         allow[1, 5] = True
         allow[2, 2] = True
+        allow[2, 4] = True
         allow[3, 3] = True
         allow[4, 4] = True
         allow[5, 5] = True
-        self.register_buffer('allow_mask', allow.unsqueeze(0).expand(num_heads, -1, -1))
+        self.register_buffer('allow_mask', allow)
+        hard_mask = T.full((seq_len, seq_len), -hard_mask_value)
+        hard_mask = T.where(allow, T.zeros_like(hard_mask), hard_mask)
+        self.register_buffer('hard_mask', hard_mask)
 
-    def forward(self, logits):
-        if self.mask_mode == "additive":
-            blocked = T.full_like(logits, -1e9)
-            return T.where(self.allow_mask.unsqueeze(0), logits, blocked)
+        # Source -> target adjacency over observed variables [X, Y, Z] for chain graph.
+        if self.mask_structure == "fixed-chain":
+            fixed_adjacency = T.tensor([
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0],
+            ])
+            self.register_buffer('fixed_adjacency', fixed_adjacency)
+            self.register_parameter('edge_logits', None)
+        else:
+            edge_logits = T.full((4,), init_edge_logit)
+            if init_edge_logit_std > 0:
+                edge_logits = edge_logits + init_edge_logit_std * T.randn(4)
+            self.edge_logits = nn.Parameter(edge_logits)
+        self.register_buffer('frozen_adjacency', T.zeros(3, 3))
+        self.register_buffer('has_frozen_adjacency', T.tensor(False, dtype=T.bool))
 
-        return T.where(self.allow_mask.unsqueeze(0), logits, T.full_like(logits, -1e9))
+    def _uses_hard_observed_adjacency(self):
+        return self.mask_structure == "fixed-chain" or bool(self.has_frozen_adjacency.item())
+
+    def get_raw_observed_adjacency(self):
+        if self.mask_structure == "fixed-chain":
+            return self.fixed_adjacency
+        if bool(self.has_frozen_adjacency.item()):
+            return self.frozen_adjacency
+        weights = T.sigmoid(self.edge_logits)
+        adjacency = weights.new_zeros(3, 3)
+        adjacency[0, 1] = weights[0]  # x -> y
+        adjacency[1, 0] = weights[1]  # y -> x
+        adjacency[1, 2] = weights[2]  # y -> z
+        adjacency[2, 1] = weights[3]  # z -> y
+        return adjacency
+
+    def project_adjacency_to_order(self, adjacency, order):
+        if len(order) != 3:
+            raise ValueError("order must contain exactly three variables.")
+        ranks = {node: idx for idx, node in enumerate(order)}
+        projected = adjacency.new_zeros(adjacency.shape)
+
+        if ranks[0] < ranks[1]:
+            projected[0, 1] = adjacency[0, 1]
+        else:
+            projected[1, 0] = adjacency[1, 0]
+
+        if ranks[1] < ranks[2]:
+            projected[1, 2] = adjacency[1, 2]
+        else:
+            projected[2, 1] = adjacency[2, 1]
+
+        return projected
+
+    def freeze_to_order(self, order):
+        if self.mask_structure != "learnable":
+            return
+        raw_adjacency = self.get_raw_observed_adjacency().detach()
+        projected = self.project_adjacency_to_order(raw_adjacency, order)
+        self.frozen_adjacency.copy_(projected.to(device=self.frozen_adjacency.device, dtype=self.frozen_adjacency.dtype))
+        self.has_frozen_adjacency.fill_(True)
+
+    def get_observed_adjacency(self):
+        adjacency = self.get_raw_observed_adjacency()
+        if self.adjacency_normalization == "sum":
+            adjacency = adjacency / adjacency.sum().clamp_min(self.gate_renorm_eps)
+        return adjacency
+
+    def expanded_gate_matrix(self):
+        adjacency = self.get_observed_adjacency()
+        gate_edges = adjacency
+        if not self._uses_hard_observed_adjacency():
+            gate_edges = self.gate_floor + (1.0 - self.gate_floor) * adjacency
+
+        gates = adjacency.new_zeros(self.seq_len, self.seq_len)
+        gates.fill_diagonal_(1.0)
+
+        # u_x can attend to Y via y -> x
+        gates[0, 4] = gate_edges[1, 0]
+        # u_y can attend to X via x -> y and Z via z -> y
+        gates[1, 3] = gate_edges[0, 1]
+        gates[1, 5] = gate_edges[2, 1]
+        # u_z can attend to Y via y -> z
+        gates[2, 4] = gate_edges[1, 2]
+        return gates
+
+    def expanded_mask_weights(self):
+        return self.expanded_gate_matrix()
+
+    def apply_hard_mask(self, logits):
+        hard_mask = self.hard_mask.to(device=logits.device, dtype=logits.dtype)
+        return logits + hard_mask.unsqueeze(0).unsqueeze(0)
+
+    def apply_graph_gates(self, attn_weights):
+        gates = self.expanded_gate_matrix().to(device=attn_weights.device, dtype=attn_weights.dtype)
+        gated = attn_weights * gates.unsqueeze(0).unsqueeze(0)
+        return gated / (gated.sum(dim=-1, keepdim=True) + self.gate_renorm_eps)
 
     def observed_dependency_scores(self, num_variables):
         if num_variables * 2 != self.seq_len:
             raise ValueError("num_variables does not match the configured sequence length.")
-        allow = self.allow_mask.float().mean(dim=0)
-        return allow[:num_variables, num_variables:]
+        # Return target <- source scores for sampling order heuristics.
+        return self.get_observed_adjacency().transpose(0, 1)
+
+    def dag_penalty(self):
+        if self._uses_hard_observed_adjacency():
+            return T.zeros((), device=self.hard_mask.device, dtype=T.float32)
+        adjacency = self.get_observed_adjacency()
+        gram = adjacency * adjacency
+        system = self.dagma_s * T.eye(gram.shape[0], device=gram.device, dtype=gram.dtype) - gram
+        sign, logabsdet = T.linalg.slogdet(system)
+        if T.any(sign <= 0) or not T.isfinite(logabsdet):
+            raise ValueError("DAG penalty is undefined because sI - W o W left the positive-logdet domain.")
+        return -logabsdet + gram.shape[0] * math.log(self.dagma_s)
+
+    def l1_penalty(self):
+        if self._uses_hard_observed_adjacency():
+            return T.zeros((), device=self.hard_mask.device, dtype=T.float32)
+        return self.get_raw_observed_adjacency().abs().sum()
 
 
 class MaskedAttentionBlock(nn.Module):
-    def __init__(self, embed_dim, num_heads, ffn_hidden_dim, graph="chain", mask_mode="additive",
-                 dropout=0.0, residual=True):
+    def __init__(self, embed_dim, num_heads, ffn_hidden_dim, dropout=0.0, residual=True):
         super().__init__()
         if embed_dim % num_heads != 0:
             raise ValueError("embed_dim must be divisible by num_heads.")
@@ -92,9 +225,6 @@ class MaskedAttentionBlock(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
 
-        self.mask_module = None
-        self.graph = graph
-        self.mask_mode = mask_mode
         self.residual = residual
 
         self.norm1 = nn.LayerNorm(embed_dim)
@@ -107,14 +237,6 @@ class MaskedAttentionBlock(nn.Module):
             nn.Linear(ffn_hidden_dim, embed_dim),
         )
 
-    def set_seq_len(self, seq_len):
-        self.mask_module = MixedChainAttentionMask(
-            self.num_heads,
-            seq_len,
-            graph=self.graph,
-            mask_mode=self.mask_mode,
-        )
-
     def _reshape_heads(self, x):
         batch_size, seq_len, _ = x.shape
         x = x.view(batch_size, seq_len, self.num_heads, self.head_dim)
@@ -125,10 +247,7 @@ class MaskedAttentionBlock(nn.Module):
         x = x.permute(0, 2, 1, 3).contiguous()
         return x.view(batch_size, seq_len, num_heads * head_dim)
 
-    def forward(self, x):
-        if self.mask_module is None:
-            self.set_seq_len(x.shape[1])
-
+    def forward(self, x, mask_module):
         residual = x
         x_norm = self.norm1(x)
 
@@ -137,8 +256,9 @@ class MaskedAttentionBlock(nn.Module):
         v = self._reshape_heads(self.v_proj(x_norm))
 
         attn_logits = T.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        attn_logits = self.mask_module(attn_logits)
+        attn_logits = mask_module.apply_hard_mask(attn_logits)
         attn_weights = T.softmax(attn_logits, dim=-1)
+        attn_weights = mask_module.apply_graph_gates(attn_weights)
         attn_weights = self.dropout(attn_weights)
 
         attn_out = T.matmul(attn_weights, v)
@@ -170,7 +290,13 @@ class PAGModel(nn.Module):
         latent_mlp_layers=2,
         head_hidden_dim=64,
         graph="chain",
-        mask_mode="additive",
+        mask_structure="learnable",
+        dagma_s=2.0,
+        init_edge_logit=0,
+        mask_init_std=1.0,
+        adjacency_normalization="none",
+        gate_floor=0.05,
+        gate_renorm_eps=1e-6,
         dropout=0.0,
         latent_prior="normal",
         residual=True,
@@ -188,6 +314,12 @@ class PAGModel(nn.Module):
         self.embed_dim = embed_dim
         self.latent_prior = latent_prior
         self.graph = graph
+        self.mask_structure = mask_structure
+        self.dagma_s = dagma_s
+        self.init_edge_logit = init_edge_logit
+        self.adjacency_normalization = adjacency_normalization
+        self.gate_floor = gate_floor
+        self.gate_renorm_eps = gate_renorm_eps
 
         self.variable_embedding = nn.Embedding(num_variables, embed_dim)
         self.token_type_embedding = nn.Embedding(2, embed_dim)
@@ -197,21 +329,28 @@ class PAGModel(nn.Module):
             for _ in range(num_variables)
         ])
 
+        self.mask_module = LearnableDAGChainAttentionMask(
+            seq_len=2 * num_variables,
+            graph=graph,
+            mask_structure=mask_structure,
+            dagma_s=dagma_s,
+            init_edge_logit=init_edge_logit,
+            init_edge_logit_std=mask_init_std,
+            adjacency_normalization=adjacency_normalization,
+            gate_floor=gate_floor,
+            gate_renorm_eps=gate_renorm_eps,
+        )
+
         self.blocks = nn.ModuleList([
             MaskedAttentionBlock(
                 embed_dim=embed_dim,
                 num_heads=num_heads,
                 ffn_hidden_dim=ffn_hidden_dim,
-                graph=graph,
-                mask_mode=mask_mode,
                 dropout=dropout,
                 residual=residual,
             )
             for _ in range(num_layers)
         ])
-        seq_len = 2 * num_variables
-        for block in self.blocks:
-            block.set_seq_len(seq_len)
 
         self.output_heads = nn.ModuleList([
             nn.Sequential(
@@ -282,7 +421,7 @@ class PAGModel(nn.Module):
 
         tokens = tokens.view(batch_size * mc_samples, 2 * self.num_variables, self.embed_dim)
         for block in self.blocks:
-            tokens = block(tokens)
+            tokens = block(tokens, self.mask_module)
         tokens = tokens.view(batch_size, mc_samples, 2 * self.num_variables, self.embed_dim)
 
         u_tokens = tokens[:, :, :self.num_variables, :]
@@ -301,15 +440,23 @@ class PAGModel(nn.Module):
         cond_log_prob = self.conditional_log_prob(values, latents)
         return T.logsumexp(cond_log_prob, dim=1) - math.log(cond_log_prob.shape[1])
 
+    def get_observed_adjacency(self):
+        return self.mask_module.get_observed_adjacency()
+
+    def expanded_gate_matrix(self):
+        return self.mask_module.expanded_gate_matrix()
+
+    def expanded_mask_weights(self):
+        return self.mask_module.expanded_mask_weights()
+
+    def dag_penalty(self):
+        return self.mask_module.dag_penalty()
+
+    def l1_penalty(self):
+        return self.mask_module.l1_penalty()
+
     def _sampling_dependency_scores(self):
-        dep_scores = []
-        for block in self.blocks:
-            if block.mask_module is None:
-                block.set_seq_len(2 * self.num_variables)
-            dep_scores.append(block.mask_module.observed_dependency_scores(self.num_variables))
-        if not dep_scores:
-            raise ValueError("At least one attention block is required to build a sampling order.")
-        return T.stack(dep_scores, dim=0).mean(dim=0)
+        return self.mask_module.observed_dependency_scores(self.num_variables)
 
     def _build_confidence_order(self):
         dep_scores = self._sampling_dependency_scores().clone()

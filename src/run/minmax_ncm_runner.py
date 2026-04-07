@@ -62,6 +62,27 @@ class NCMMinMaxRunner(BaseRunner):
 
         return stored_metrics
 
+    @staticmethod
+    def _compute_query_bounds(cg_file, do_var_list, dat_sets, bound_query):
+        if bound_query is None:
+            return None, None
+
+        observational_idx = None
+        for idx, dat_do_set in enumerate(do_var_list):
+            if len(dat_do_set) == 0:
+                observational_idx = idx
+                break
+        if observational_idx is None:
+            raise ValueError("query bounds require an observational dataset with do-set {}.")
+
+        graph_name = os.path.splitext(os.path.basename(cg_file))[0]
+        observational_table = evaluation.probability_table(dat=dat_sets[observational_idx])
+        return evaluation.atomic_query_bounds_from_probability_table(graph_name, bound_query, observational_table)
+
+    @staticmethod
+    def _reject_dataset_from_bounds(lower_bound, upper_bound):
+        return upper_bound > 0.9 and lower_bound < 0.1
+
     def run(self, exp_name, cg_file, n, dim, trial_index, hyperparams=None, gpu=None,
             lockinfo=os.environ.get('SLURM_JOB_ID', ''), verbose=False):
         key = self.get_key(cg_file, n, dim, trial_index)
@@ -86,6 +107,8 @@ class NCMMinMaxRunner(BaseRunner):
 
                 # ensure the positivity assumption holds
                 positivity = False
+                accepted_lower_bound = None
+                accepted_upper_bound = None
                 while not positivity:
                     seed += 1
                     T.manual_seed(seed)
@@ -106,9 +129,12 @@ class NCMMinMaxRunner(BaseRunner):
                         dat_m = self.dat_model(cg, dim=dim, seed=seed)
 
                     # checks if the data has already been generated
-                    if os.path.isfile(f'{d}/dat.th'):
+                    dat_path = f'{d}/dat.th'
+                    loaded_cached_data = False
+                    if os.path.isfile(dat_path):
                         dat_sets = T.load(f'{d}/dat.th')
                         positivity = True
+                        loaded_cached_data = True
                     else:
                         dat_sets = []
                         all_positive = True
@@ -130,8 +156,38 @@ class NCMMinMaxRunner(BaseRunner):
 
                         positivity = all_positive
 
-                        if positivity:
-                            T.save(dat_sets, f'{d}/dat.th')
+                    if positivity and hyperparams.get('bound', False):
+                        lower_bound, upper_bound = self._compute_query_bounds(
+                            cg_file,
+                            hyperparams["do-var-list"],
+                            dat_sets,
+                            hyperparams.get('bound-query'),
+                        )
+                        if self._reject_dataset_from_bounds(lower_bound, upper_bound):
+                            positivity = False
+                            accepted_lower_bound = None
+                            accepted_upper_bound = None
+                            print(
+                                "Rejecting data for seed {} because lower_bound={:.6f} < 0.1 and upper_bound={:.6f} > 0.9".format(
+                                    seed,
+                                    lower_bound,
+                                    upper_bound,
+                                )
+                            )
+                            if loaded_cached_data and os.path.isfile(dat_path):
+                                os.remove(dat_path)
+                            continue
+                        accepted_lower_bound = lower_bound
+                        accepted_upper_bound = upper_bound
+                    else:
+                        accepted_lower_bound = None
+                        accepted_upper_bound = None
+
+                    if positivity and not loaded_cached_data:
+                        T.save(dat_sets, dat_path)
+
+                hyperparams['query-bound-lower'] = accepted_lower_bound
+                hyperparams['query-bound-upper'] = accepted_upper_bound
 
                 with open(f'{d}/hyperparams.json', 'w') as file:
                     new_hp = {k: str(v) for (k, v) in hyperparams.items()}
@@ -160,11 +216,16 @@ class NCMMinMaxRunner(BaseRunner):
                         np.random.seed(seed)
                         print("Run {} seed: {}".format(r, seed))
 
+                        max_hyperparams = dict(hyperparams)
+                        max_hyperparams['selection-mode'] = 'max'
+                        min_hyperparams = dict(hyperparams)
+                        min_hyperparams['selection-mode'] = 'min'
+
                         m_max = self.pipeline(dat_m, hyperparams["do-var-list"], dat_sets, cg, dim,
-                                              hyperparams=hyperparams, ncm_model=self.ncm_model,
+                                              hyperparams=max_hyperparams, ncm_model=self.ncm_model,
                                               max_query=hyperparams.get('max-query-1', None))
                         m_min = self.pipeline(dat_m, hyperparams["do-var-list"], dat_sets, cg, dim,
-                                              hyperparams=hyperparams, ncm_model=self.ncm_model,
+                                              hyperparams=min_hyperparams, ncm_model=self.ncm_model,
                                               max_query=hyperparams.get('max-query-2', None))
 
                         # train models
@@ -178,20 +239,51 @@ class NCMMinMaxRunner(BaseRunner):
                                                             verbose=verbose, stored_metrics=stored_metrics,
                                                             query_track=hyperparams['eval-query'])
                         trainer_max.fit(m_max)
-                        ckpt_max = T.load(checkpoint_max.best_model_path)
-                        m_max.load_state_dict(ckpt_max['state_dict'])
+                        selected_max_state = m_max.get_selected_state_dict()
+                        if selected_max_state is not None:
+                            m_max.load_state_dict(selected_max_state)
+                        elif checkpoint_max.best_model_path:
+                            ckpt_max = T.load(checkpoint_max.best_model_path)
+                            m_max.load_state_dict(ckpt_max['state_dict'])
 
                         print("\nTraining min model...")
                         stored_metrics = self.print_metrics(m_min, hyperparams['do-var-list'], dat_sets,
                                                             verbose=verbose, stored_metrics=stored_metrics,
                                                             query_track=hyperparams['eval-query'])
                         trainer_min.fit(m_min)
-                        ckpt_min = T.load(checkpoint_min.best_model_path)
-                        m_min.load_state_dict(ckpt_min['state_dict'])
+                        selected_min_state = m_min.get_selected_state_dict()
+                        if selected_min_state is not None:
+                            m_min.load_state_dict(selected_min_state)
+                        elif checkpoint_min.best_model_path:
+                            ckpt_min = T.load(checkpoint_min.best_model_path)
+                            m_min.load_state_dict(ckpt_min['state_dict'])
 
                         results = evaluation.all_metrics_minmax(
                             m_max.generator, m_min.ncm, m_max.ncm, hyperparams['do-var-list'], dat_sets,
                             n=100000, query_track=hyperparams['eval-query'])
+                        lower_bound = hyperparams.get('query-bound-lower')
+                        upper_bound = hyperparams.get('query-bound-upper')
+                        if lower_bound is not None and upper_bound is not None:
+                            bound_query = hyperparams.get('bound-query', hyperparams.get('eval-query'))
+                            bound_query_name = evaluation.serialize_query(bound_query)
+                            max_key = 'max_ncm_{}'.format(bound_query_name)
+                            min_key = 'min_ncm_{}'.format(bound_query_name)
+                            results['lower_bound'] = lower_bound
+                            results['upper_bound'] = upper_bound
+                            if max_key in results:
+                                results['err_upper_bound'] = results[max_key] - upper_bound
+                            if min_key in results:
+                                results['err_lower_bound'] = results[min_key] - lower_bound
+                        selected_max_metrics = m_max.get_selected_metrics()
+                        selected_min_metrics = m_min.get_selected_metrics()
+                        if selected_max_metrics is not None:
+                            results['selected_max_epoch'] = selected_max_metrics['epoch']
+                            results['selected_max_total_dat_KL'] = selected_max_metrics['kl']
+                            results['selected_max_query'] = selected_max_metrics['query']
+                        if selected_min_metrics is not None:
+                            results['selected_min_epoch'] = selected_min_metrics['epoch']
+                            results['selected_min_total_dat_KL'] = selected_min_metrics['kl']
+                            results['selected_min_query'] = selected_min_metrics['query']
                         print(results)
 
                         # save results
