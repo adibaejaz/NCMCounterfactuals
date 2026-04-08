@@ -31,6 +31,76 @@ class StructuralFn(Protocol):
         ...
 
 
+class MaskingRule(nn.Module):
+    """
+    Base class for edge-wise masking rules.
+
+    A masking rule determines both:
+    - the value exposed to a node mechanism for one masked input
+    - whether a mask entry counts as an active edge in the induced graph
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def apply(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
+        raise NotImplementedError()
+
+    def edge_is_active(self, mask_value: T.Tensor) -> bool:
+        raise NotImplementedError()
+
+
+class ThresholdMaskingRule(MaskingRule):
+    def __init__(self, threshold: float):
+        super().__init__()
+        self.threshold = threshold
+
+    def apply(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
+        if mask_value.detach().item() > self.threshold:
+            return value
+        return perp_value
+
+    def edge_is_active(self, mask_value: T.Tensor) -> bool:
+        return bool(mask_value.detach().item() > self.threshold)
+
+
+class MultiplyMaskingRule(MaskingRule):
+    def apply(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
+        return mask_value.to(device=value.device, dtype=value.dtype) * value
+
+    def edge_is_active(self, mask_value: T.Tensor) -> bool:
+        return bool(mask_value.detach().item() != 0)
+
+
+class GateMaskingRule(MaskingRule):
+    def __init__(self, threshold: float, sharpness: float):
+        super().__init__()
+        self.threshold = threshold
+        self.sharpness = sharpness
+
+    def apply(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
+        gate = T.sigmoid(
+            self.sharpness * (
+                mask_value.to(device=value.device, dtype=value.dtype) - self.threshold))
+        return gate * value + (1 - gate) * perp_value
+
+    def edge_is_active(self, mask_value: T.Tensor) -> bool:
+        return bool(mask_value.detach().item() > self.threshold)
+
+
+def get_masking_rule(
+        mask_mode: Literal["threshold", "multiply", "gate"],
+        mask_threshold: float = DEFAULT_MASK_THRESHOLD,
+        gate_sharpness: float = DEFAULT_GATE_SHARPNESS) -> MaskingRule:
+    if mask_mode == "threshold":
+        return ThresholdMaskingRule(mask_threshold)
+    if mask_mode == "multiply":
+        return MultiplyMaskingRule()
+    if mask_mode == "gate":
+        return GateMaskingRule(mask_threshold, gate_sharpness)
+    raise ValueError("unknown mask mode: {}".format(mask_mode))
+
+
 class MaskedSCM(nn.Module):
     """
     Structural causal model with formal mask variables.
@@ -43,8 +113,7 @@ class MaskedSCM(nn.Module):
     Structural mechanisms keep the same callable type as in a standard SCM:
     ``f_k(v, u)``. The difference is that each node is evaluated against a
     node-local masked view of ``v``. The rule that maps a mask entry and a
-    value to the visible input is intentionally left abstract here so different
-    masking schemes can be plugged in later.
+    value to the visible input is handled by a pluggable ``MaskingRule``.
 
     Likewise, this class does not fix an evaluation protocol. Different
     protocols may be needed for recursive, cyclic, synchronous, or fixed-point
@@ -63,7 +132,8 @@ class MaskedSCM(nn.Module):
             mask_threshold: float = DEFAULT_MASK_THRESHOLD,
             gate_sharpness: float = DEFAULT_GATE_SHARPNESS,
             max_iters: int = DEFAULT_MAX_ITERS,
-            tol: Optional[float] = DEFAULT_TOL):
+            tol: Optional[float] = DEFAULT_TOL,
+            masking_rule: Optional[MaskingRule] = None):
         """
         Args:
             v: Endogenous variable names.
@@ -79,6 +149,9 @@ class MaskedSCM(nn.Module):
             tol: Optional convergence tolerance. If provided, synchronous
                 updates stop early once the maximum state change is at most
                 ``tol``.
+            masking_rule: Optional explicit masking-rule object. If omitted,
+                one is constructed from ``mask_mode``, ``mask_threshold``, and
+                ``gate_sharpness``.
 
         Notes:
             The intended mask parameterization is an ``n x n`` tensor with
@@ -98,6 +171,10 @@ class MaskedSCM(nn.Module):
         self.mask_mode = mask_mode
         self.mask_threshold = mask_threshold
         self.gate_sharpness = gate_sharpness
+        self.masking_rule = masking_rule if masking_rule is not None else get_masking_rule(
+            mask_mode=mask_mode,
+            mask_threshold=mask_threshold,
+            gate_sharpness=gate_sharpness)
         self.max_iters = max_iters
         self.tol = tol
         self.v2i = {name: i for i, name in enumerate(self.v)}
@@ -153,58 +230,18 @@ class MaskedSCM(nn.Module):
         value = T.ones((n, self.v_size[k]), device=self.device_param.device)
         return self._perp_like(value)
 
-    def _threshold_mask(self, mask_value: T.Tensor, value: T.Tensor) -> T.Tensor:
-        if mask_value.detach().item() > self.mask_threshold:
-            return value
-        return self._perp_like(value)
-
-    def _multiply_mask(self, mask_value: T.Tensor, value: T.Tensor) -> T.Tensor:
-        return mask_value.to(device=value.device, dtype=value.dtype) * value
-
-    def _gate_mask(self, mask_value: T.Tensor, value: T.Tensor) -> T.Tensor:
-        gate = T.sigmoid(
-            self.gate_sharpness * (
-                mask_value.to(device=value.device, dtype=value.dtype) - self.mask_threshold))
-        perp_value = self._perp_like(value)
-        return gate * value + (1 - gate) * perp_value
-
     def _edge_is_active(self, mask_value: T.Tensor) -> bool:
         """
         Decide whether a mask entry induces a directed edge in the associated
         graph.
-
-        The current convention is:
-        - ``threshold``: active iff ``mask_value > mask_threshold``
-        - ``multiply``: active iff ``mask_value`` is nonzero
-        - ``gate``: active iff ``mask_value > mask_threshold``
         """
-        value = mask_value.detach().item()
-        if self.mask_mode == "threshold":
-            return bool(value > self.mask_threshold)
-        if self.mask_mode == "multiply":
-            return bool(value != 0)
-        if self.mask_mode == "gate":
-            return bool(value > self.mask_threshold)
-        raise ValueError("unknown mask mode: {}".format(self.mask_mode))
+        return self.masking_rule.edge_is_active(mask_value)
 
     def _mask_value(self, mask_value: T.Tensor, value: T.Tensor) -> T.Tensor:
         """
         Apply the masking rule for a single directed input.
-
-        Supported schemes are:
-        - ``threshold``: return ``value`` when ``mask_value > mask_threshold``,
-          otherwise return ``perp_value``
-        - ``multiply``: return ``mask_value * value``
-        - ``gate``: return a sigmoid interpolation between ``value`` and
-          ``perp_value``, centered at ``mask_threshold``
         """
-        if self.mask_mode == "threshold":
-            return self._threshold_mask(mask_value, value)
-        if self.mask_mode == "multiply":
-            return self._multiply_mask(mask_value, value)
-        if self.mask_mode == "gate":
-            return self._gate_mask(mask_value, value)
-        raise ValueError("unknown mask mode: {}".format(self.mask_mode))
+        return self.masking_rule.apply(mask_value, value, self._perp_like(value))
 
     def _masked_inputs(self, k: str, v: Mapping[str, T.Tensor], mask: MaskTensor) -> TensorDict:
         """
