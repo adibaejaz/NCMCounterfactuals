@@ -6,12 +6,14 @@ from typing import Dict, Literal, Mapping, Optional, Protocol, Sequence, Union
 import torch as T
 import torch.nn as nn
 
+from .distribution.continuous_distribution import UniformDistribution
 from .distribution.distribution import Distribution
 
 
 TensorDict = Dict[str, T.Tensor]
 MaskValue = Union[float, int, T.Tensor]
 MaskTensor = T.Tensor
+DEFAULT_PERP_VALUE = -1.0
 
 
 class StructuralFn(Protocol):
@@ -137,6 +139,10 @@ class MaskedSCM(nn.Module):
             perp_value = T.tensor(self.perp_value, device=value.device, dtype=value.dtype)
         return T.ones_like(value) * perp_value
 
+    def _perp_tensor(self, n: int, k: str) -> T.Tensor:
+        value = T.ones((n, self.v_size[k]), device=self.device_param.device)
+        return self._perp_like(value)
+
     def _threshold_mask(self, mask_value: T.Tensor, value: T.Tensor) -> T.Tensor:
         if mask_value.detach().item() > self.mask_threshold:
             return value
@@ -194,17 +200,24 @@ class MaskedSCM(nn.Module):
         """
         Build the masked node-local view of ``v`` used when evaluating node ``k``.
 
-        For each non-self variable ``src`` that is present in ``v``, the value
-        passed to ``f[k]`` is computed from ``mask[self.v2i[src], self.v2i[k]]``
-        and the current value ``v[src]`` via ``_mask_value``.
+        For each non-self variable ``src``, the value passed to ``f[k]`` is
+        computed from ``mask[self.v2i[src], self.v2i[k]]`` and the current
+        value of ``src`` via ``_mask_value``. Variables not yet present in
+        ``v`` are treated as ``perp`` so that recursive and synchronous
+        evaluation expose the same node-local state.
         """
+        if len(v) == 0:
+            raise ValueError("masked inputs require at least one available tensor for shape inference")
+
+        n = len(v[next(iter(v))])
         j = self.v2i[k]
-        v_masked = dict(v)
+        v_masked = {}
         for src in self.v:
-            if src == k or src not in v:
+            if src == k:
                 continue
             i = self.v2i[src]
-            v_masked[src] = self._mask_value(mask[i, j], v[src])
+            raw_value = v[src] if src in v else self._perp_tensor(n, src)
+            v_masked[src] = self._mask_value(mask[i, j], raw_value)
         return v_masked
 
     def induced_edges(self, mask: MaskTensor):
@@ -289,7 +302,16 @@ class MaskedSCM(nn.Module):
             v: Mapping[str, T.Tensor],
             u: Mapping[str, T.Tensor],
             mask: MaskTensor) -> T.Tensor:
-        v_masked = self._masked_inputs(k, v, mask)
+        if len(v) == 0:
+            u_key = next(iter(u))
+            n = len(u[u_key])
+            v_masked = {
+                src: self._mask_value(mask[self.v2i[src], self.v2i[k]], self._perp_tensor(n, src))
+                for src in self.v
+                if src != k
+            }
+        else:
+            v_masked = self._masked_inputs(k, v, mask)
         return self.f[k](v_masked, u)
 
     def _init_state(self, u: TensorDict, do: TensorDict) -> TensorDict:
@@ -452,3 +474,112 @@ class MaskedSCM(nn.Module):
 
         return self.sample(
             n=n, u=u, do=do, select=select, mask=mask, use_dag_updates=use_dag_updates)
+
+
+def _demo_get_value(v, k, like):
+    if k in v:
+        return v[k].float()
+    return T.ones_like(like, dtype=T.float) * DEFAULT_PERP_VALUE
+
+
+def _build_demo_masked_scm(mask_mode: str) -> MaskedSCM:
+    v = ["A", "B", "C"]
+    u_names = ["UA", "UB", "UC"]
+    u_sizes = {name: 1 for name in u_names}
+    pu = UniformDistribution(u_names, u_sizes, seed=0)
+
+    def f_a(v, u):
+        noise = u["UA"].float()
+        score = 0.8 * _demo_get_value(v, "B", noise) - 0.4 * _demo_get_value(v, "C", noise)
+        prob = T.sigmoid(score)
+        return (noise < prob).float()
+
+    def f_b(v, u):
+        noise = u["UB"].float()
+        score = 0.9 * _demo_get_value(v, "A", noise) + 0.3 * _demo_get_value(v, "C", noise)
+        prob = T.sigmoid(score)
+        return (noise < prob).float()
+
+    def f_c(v, u):
+        noise = u["UC"].float()
+        score = 0.7 * _demo_get_value(v, "A", noise) + 0.7 * _demo_get_value(v, "B", noise)
+        prob = T.sigmoid(score)
+        return (noise < prob).float()
+
+    return MaskedSCM(
+        v=v,
+        f={"A": f_a, "B": f_b, "C": f_c},
+        pu=pu,
+        perp_value=DEFAULT_PERP_VALUE,
+        mask_mode=mask_mode,
+        mask_threshold=0.5,
+        gate_sharpness=12.0,
+        max_iters=6,
+        tol=1e-6,
+    )
+
+
+def _acyclic_demo_mask() -> T.Tensor:
+    mask = T.zeros((3, 3), dtype=T.float)
+    mask[0, 1] = 1.0
+    mask[0, 2] = 1.0
+    mask[1, 2] = 1.0
+    return mask
+
+
+def _cyclic_demo_mask() -> T.Tensor:
+    mask = T.zeros((3, 3), dtype=T.float)
+    mask[0, 1] = 1.0
+    mask[1, 0] = 1.0
+    mask[1, 2] = 1.0
+    return mask
+
+
+def _soft_demo_mask() -> T.Tensor:
+    return T.tensor([
+        [0.0, 0.9, 0.2],
+        [0.7, 0.0, 0.8],
+        [0.4, 0.6, 0.0],
+    ])
+
+
+def _summarize_demo_samples(name: str, samples: TensorDict):
+    means = {k: round(samples[k].float().mean().item(), 4) for k in samples}
+    first = {
+        k: [round(x, 4) for x in samples[k][:3].view(-1).tolist()]
+        for k in samples
+    }
+    print(name)
+    print("  means:", means)
+    print("  first3:", first)
+
+
+if __name__ == "__main__":
+    masks = {
+        "acyclic": _acyclic_demo_mask(),
+        "cyclic": _cyclic_demo_mask(),
+        "soft": _soft_demo_mask(),
+    }
+
+    for mask_mode in ["threshold", "multiply", "gate"]:
+        print("== mask_mode={} ==".format(mask_mode))
+        for mask_name, mask in masks.items():
+            for use_dag_updates in [False, True]:
+                scm = _build_demo_masked_scm(mask_mode)
+                u = scm.pu.sample(8)
+                samples = scm.sample(u=u, mask=mask, use_dag_updates=use_dag_updates)
+                update_name = "dag" if use_dag_updates else "sync"
+                _summarize_demo_samples(
+                    "{} | {} | acyclic={}".format(
+                        mask_name, update_name, scm.is_acyclic(mask)),
+                    samples)
+                if not use_dag_updates:
+                    print(
+                        "  sync_meta:",
+                        dict(
+                            converged=scm.last_converged,
+                            iterations=scm.last_iterations,
+                            delta=None if scm.last_delta is None else round(scm.last_delta, 6),
+                        ),
+                    )
+        print()
