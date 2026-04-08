@@ -1,9 +1,14 @@
 import torch as T
+from torch.special import logit
 
 from src.scm.masked_scm import DEFAULT_USE_DAG_UPDATES
 from src.scm.ncm.masked_feedforward_ncm import MaskedFF_NCM
 
 from .base_pipeline import BasePipeline
+
+DEFAULT_CYCLE_LAMBDA = 0.0
+DEFAULT_CYCLE_PENALTY = "notears"
+DEFAULT_DAGMA_S = 1.0
 
 
 class MaskedBasePipeline(BasePipeline):
@@ -18,27 +23,57 @@ class MaskedBasePipeline(BasePipeline):
             batch_size=256,
             init_mask=None,
             learn_mask=True,
+            mask_init_mode="constant",
+            mask_init_value=0.5,
+            mask_init_range=(0.25, 0.75),
             use_dag_updates=DEFAULT_USE_DAG_UPDATES):
         super().__init__(generator, do_var_list, dat_sets, cg, dim, ncm, batch_size=batch_size)
 
         if init_mask is None:
-            init_mask = T.ones((len(self.ncm.v), len(self.ncm.v)), dtype=T.float)
+            init_mask = self._init_mask(
+                mode=mask_init_mode,
+                value=mask_init_value,
+                value_range=mask_init_range)
 
         init_mask = init_mask.float()
         if learn_mask:
-            self.mask_parameter = T.nn.Parameter(init_mask)
+            eps = 1e-6
+            init_logits = logit(init_mask.clamp(min=eps, max=1 - eps))
+            self.mask_parameter = T.nn.Parameter(init_logits)
         else:
             self.register_buffer("mask_parameter", init_mask)
 
         self.learn_mask = learn_mask
         self.use_dag_updates = use_dag_updates
 
+    def _init_mask(self, mode="constant", value=0.5, value_range=(0.25, 0.75)):
+        n = len(self.ncm.v)
+        eye = T.eye(n, dtype=T.float)
+
+        if mode == "constant":
+            mask = T.ones((n, n), dtype=T.float) * value
+        elif mode == "uniform":
+            low, high = value_range
+            mask = low + (high - low) * T.rand((n, n), dtype=T.float)
+        elif mode == "zeros":
+            mask = T.zeros((n, n), dtype=T.float)
+        elif mode == "ones":
+            mask = T.ones((n, n), dtype=T.float)
+        else:
+            raise ValueError("unknown mask init mode: {}".format(mode))
+
+        return mask * (1 - eye)
+
     def get_mask(self):
+        if self.learn_mask:
+            mask = T.sigmoid(self.mask_parameter)
+        else:
+            mask = self.mask_parameter
         eye = T.eye(
-            self.mask_parameter.shape[0],
-            device=self.mask_parameter.device,
-            dtype=self.mask_parameter.dtype)
-        return self.mask_parameter * (1 - eye)
+            mask.shape[0],
+            device=mask.device,
+            dtype=mask.dtype)
+        return mask * (1 - eye)
 
     def get_edge_scores(self):
         return self.get_mask()

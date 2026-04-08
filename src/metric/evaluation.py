@@ -9,25 +9,31 @@ from src.scm.scm import expand_do
 from src.ds import CTF, CTFTerm
 
 
-def eval_query(m, ctf, n=1000000):
+def eval_query(m, ctf, n=1000000, model_kwargs=None):
+    if model_kwargs is None:
+        model_kwargs = dict()
     if isinstance(ctf, CTF):
-        return m.compute_ctf(ctf, n=n, evaluating=True)
+        return m.compute_ctf(ctf, n=n, evaluating=True, **model_kwargs)
     else:
-        return ctf_sum(m, ctf, n=n)
+        return ctf_sum(m, ctf, n=n, model_kwargs=model_kwargs)
 
 
-def ctf_sum(m, ctf_list, n=1000000):
+def ctf_sum(m, ctf_list, n=1000000, model_kwargs=None):
+    if model_kwargs is None:
+        model_kwargs = dict()
     total = 0
     for ctf, sign in ctf_list:
-        total += sign * m.compute_ctf(ctf, n=n, evaluating=True)
+        total += sign * m.compute_ctf(ctf, n=n, evaluating=True, **model_kwargs)
     return total
 
 
-def probability_table(m=None, n=1000000, do={}, dat=None):
+def probability_table(m=None, n=1000000, do={}, dat=None, model_kwargs=None):
     assert m is not None or dat is not None
+    if model_kwargs is None:
+        model_kwargs = dict()
 
     if dat is None:
-        dat = m(n, do=do, evaluating=True)
+        dat = m(n, do=do, evaluating=True, **model_kwargs)
 
     cols = dict()
     for v in sorted(dat):
@@ -42,9 +48,9 @@ def probability_table(m=None, n=1000000, do={}, dat=None):
             [[*df.columns, 'P(V)']])
 
 
-def kl(truth, ncm, n=1000000, do={}, true_pv=None):
-    m_table = probability_table(ncm, n=n, do=do)
-    t_table = true_pv if true_pv is not None else probability_table(truth, n=n, do=do)
+def kl(truth, ncm, n=1000000, do={}, true_pv=None, truth_kwargs=None, ncm_kwargs=None):
+    m_table = probability_table(ncm, n=n, do=do, model_kwargs=ncm_kwargs)
+    t_table = true_pv if true_pv is not None else probability_table(truth, n=n, do=do, model_kwargs=truth_kwargs)
     cols = list(t_table.columns[:-1])
     joined_table = t_table.merge(m_table, how='left', on=cols, suffixes=['_t', '_m']).fillna(0.0000001)
     p_t = joined_table['P(V)_t']
@@ -52,9 +58,9 @@ def kl(truth, ncm, n=1000000, do={}, true_pv=None):
     return (p_t * (np.log(p_t) - np.log(p_m))).sum()
 
 
-def supremum_norm(truth, ncm, n=1000000, do={}, true_pv=None):
-    m_table = probability_table(ncm, n=n, do=do)
-    t_table = true_pv if true_pv is not None else probability_table(truth, n=n)
+def supremum_norm(truth, ncm, n=1000000, do={}, true_pv=None, truth_kwargs=None, ncm_kwargs=None):
+    m_table = probability_table(ncm, n=n, do=do, model_kwargs=ncm_kwargs)
+    t_table = true_pv if true_pv is not None else probability_table(truth, n=n, model_kwargs=truth_kwargs)
     cols = list(t_table.columns[:-1])
     joined_table = t_table.merge(m_table, how='outer', on=cols, suffixes=['_t', '_m']).fillna(0.0)
     p_t = joined_table['P(V)_t']
@@ -83,7 +89,17 @@ def serialize_query(query):
     return str(query)
 
 
-def all_metrics(truth, ncm, dat_dos, dat_sets, n=1000000, stored=None, query_track=None, include_sup=False):
+def all_metrics(
+        truth,
+        ncm,
+        dat_dos,
+        dat_sets,
+        n=1000000,
+        stored=None,
+        query_track=None,
+        include_sup=False,
+        truth_kwargs=None,
+        ncm_kwargs=None):
     true_ps = dict()
     dat_ps = dict()
     m = dict()
@@ -106,23 +122,30 @@ def all_metrics(truth, ncm, dat_dos, dat_sets, n=1000000, stored=None, query_tra
         else:
             dat_ps[name] = stored[dat_name]
 
-        m["true_KL_{}".format(name)] = kl(truth, ncm, n=n, do=expanded_do_dat, true_pv=true_ps[name])
-        m["dat_KL_{}".format(name)] = kl(truth, ncm, n=n, do=expanded_do_dat, true_pv=dat_ps[name])
+        m["true_KL_{}".format(name)] = kl(
+            truth, ncm, n=n, do=expanded_do_dat, true_pv=true_ps[name],
+            truth_kwargs=truth_kwargs, ncm_kwargs=ncm_kwargs)
+        m["dat_KL_{}".format(name)] = kl(
+            truth, ncm, n=n, do=expanded_do_dat, true_pv=dat_ps[name],
+            truth_kwargs=truth_kwargs, ncm_kwargs=ncm_kwargs)
         m["total_true_KL"] += m["true_KL_{}".format(name)]
         m["total_dat_KL"] += m["dat_KL_{}".format(name)]
         if include_sup:
-            m["true_supnorm_{}".format(name)] = supremum_norm(truth, ncm, n=n, do=expanded_do_dat,
-                                                              true_pv=true_ps[name])
-            m["dat_supnorm_{}".format(name)] = supremum_norm(truth, ncm, n=n, do=expanded_do_dat,
-                                                             true_pv=dat_ps[name])
+            m["true_supnorm_{}".format(name)] = supremum_norm(
+                truth, ncm, n=n, do=expanded_do_dat, true_pv=true_ps[name],
+                truth_kwargs=truth_kwargs, ncm_kwargs=ncm_kwargs)
+            m["dat_supnorm_{}".format(name)] = supremum_norm(
+                truth, ncm, n=n, do=expanded_do_dat, true_pv=dat_ps[name],
+                truth_kwargs=truth_kwargs, ncm_kwargs=ncm_kwargs)
             m["total_true_supnorm"] += m["true_supnorm_{}".format(name)]
             m["total_dat_supnorm"] += m["dat_supnorm_{}".format(name)]
 
     if query_track is not None:
         true_q = 'true_{}'.format(serialize_query(query_track))
-        m[true_q] = eval_query(truth, query_track, n) if stored is None or true_q not in stored else stored[true_q]
+        m[true_q] = eval_query(
+            truth, query_track, n, model_kwargs=truth_kwargs) if stored is None or true_q not in stored else stored[true_q]
         ncm_q = 'ncm_{}'.format(serialize_query(query_track))
-        m[ncm_q] = eval_query(ncm, query_track, n)
+        m[ncm_q] = eval_query(ncm, query_track, n, model_kwargs=ncm_kwargs)
         err_q = 'err_ncm_{}'.format(serialize_query(query_track))
         m[err_q] = m[true_q] - m[ncm_q]
     return m
