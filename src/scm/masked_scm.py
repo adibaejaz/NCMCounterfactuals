@@ -14,6 +14,16 @@ TensorDict = Dict[str, T.Tensor]
 MaskValue = Union[float, int, T.Tensor]
 MaskTensor = T.Tensor
 DEFAULT_PERP_VALUE = -1.0
+DEFAULT_MASK_MODE = "threshold"
+DEFAULT_MASK_THRESHOLD = 0.5
+DEFAULT_GATE_SHARPNESS = 10.0
+DEFAULT_MAX_ITERS = 5
+DEFAULT_TOL = None
+DEFAULT_USE_DAG_UPDATES = False
+DEFAULT_V_SIZE = 1
+DEFAULT_U_SIZE = 1
+DEFAULT_H_SIZE = 128
+DEFAULT_H_LAYERS = 2
 
 
 class StructuralFn(Protocol):
@@ -49,11 +59,11 @@ class MaskedSCM(nn.Module):
             pu: Distribution,
             perp_value: MaskValue,
             v_size: Optional[Mapping[str, int]] = None,
-            mask_mode: Literal["threshold", "multiply", "gate"] = "threshold",
-            mask_threshold: float = 0.5,
-            gate_sharpness: float = 10.0,
-            max_iters: int = 1,
-            tol: Optional[float] = None):
+            mask_mode: Literal["threshold", "multiply", "gate"] = DEFAULT_MASK_MODE,
+            mask_threshold: float = DEFAULT_MASK_THRESHOLD,
+            gate_sharpness: float = DEFAULT_GATE_SHARPNESS,
+            max_iters: int = DEFAULT_MAX_ITERS,
+            tol: Optional[float] = DEFAULT_TOL):
         """
         Args:
             v: Endogenous variable names.
@@ -83,7 +93,7 @@ class MaskedSCM(nn.Module):
         self.pu = pu
         if v_size is None:
             v_size = {}
-        self.v_size = {k: v_size.get(k, 1) for k in self.v}
+        self.v_size = {k: v_size.get(k, DEFAULT_V_SIZE) for k in self.v}
         self.perp_value = perp_value
         self.mask_mode = mask_mode
         self.mask_threshold = mask_threshold
@@ -379,7 +389,7 @@ class MaskedSCM(nn.Module):
             do: Optional[TensorDict] = None,
             select: Optional[Sequence[str]] = None,
             mask: Optional[MaskTensor] = None,
-            use_dag_updates: bool = False):
+            use_dag_updates: bool = DEFAULT_USE_DAG_UPDATES):
         """
         Sample from the masked SCM using either synchronous or one-pass DAG
         updates.
@@ -464,7 +474,7 @@ class MaskedSCM(nn.Module):
             select: Optional[Sequence[str]] = None,
             evaluating: bool = False,
             mask: Optional[MaskTensor] = None,
-            use_dag_updates: bool = False):
+            use_dag_updates: bool = DEFAULT_USE_DAG_UPDATES):
         if evaluating:
             with T.no_grad():
                 result = self.sample(
@@ -554,7 +564,7 @@ def _summarize_demo_samples(name: str, samples: TensorDict):
     print("  first3:", first)
 
 
-if __name__ == "__main__":
+def _run_demo_cases(build_scm):
     masks = {
         "acyclic": _acyclic_demo_mask(),
         "cyclic": _cyclic_demo_mask(),
@@ -564,9 +574,9 @@ if __name__ == "__main__":
     for mask_mode in ["threshold", "multiply", "gate"]:
         print("== mask_mode={} ==".format(mask_mode))
         for mask_name, mask in masks.items():
+            scm = build_scm(mask_mode)
+            u = scm.pu.sample(8)
             for use_dag_updates in [False, True]:
-                scm = _build_demo_masked_scm(mask_mode)
-                u = scm.pu.sample(8)
                 samples = scm.sample(u=u, mask=mask, use_dag_updates=use_dag_updates)
                 update_name = "dag" if use_dag_updates else "sync"
                 _summarize_demo_samples(
@@ -583,3 +593,7 @@ if __name__ == "__main__":
                         ),
                     )
         print()
+
+
+if __name__ == "__main__":
+    _run_demo_cases(_build_demo_masked_scm)
