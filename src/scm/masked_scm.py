@@ -66,7 +66,8 @@ class ThresholdMaskingRule(MaskingRule):
 
 class MultiplyMaskingRule(MaskingRule):
     def apply(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
-        return mask_value.to(device=value.device, dtype=value.dtype) * value
+        mask_value = mask_value.to(device=value.device, dtype=value.dtype)
+        return mask_value * value + (1 - mask_value) * perp_value
 
     def edge_is_active(self, mask_value: T.Tensor) -> bool:
         return bool(mask_value.detach().item() != 0)

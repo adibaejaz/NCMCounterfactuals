@@ -34,7 +34,36 @@ class MaskedBasePipeline(BasePipeline):
         self.use_dag_updates = use_dag_updates
 
     def get_mask(self):
-        return self.mask_parameter
+        eye = T.eye(
+            self.mask_parameter.shape[0],
+            device=self.mask_parameter.device,
+            dtype=self.mask_parameter.dtype)
+        return self.mask_parameter * (1 - eye)
+
+    def get_edge_scores(self):
+        return self.get_mask()
+
+    def notears_dag_penalty(self):
+        edge_scores = self.get_edge_scores()
+        return T.trace(T.matrix_exp(edge_scores)) - edge_scores.shape[0]
+
+    def dagma_dag_penalty(self, s=1.0):
+        edge_scores = self.get_edge_scores()
+        d = edge_scores.shape[0]
+        identity = T.eye(d, device=edge_scores.device, dtype=edge_scores.dtype)
+        s_tensor = T.tensor(float(s), device=edge_scores.device, dtype=edge_scores.dtype)
+        matrix = s_tensor * identity - edge_scores
+        sign, logabsdet = T.linalg.slogdet(matrix)
+        if sign <= 0:
+            return T.tensor(float("inf"), device=edge_scores.device, dtype=edge_scores.dtype)
+        return -logabsdet + d * T.log(s_tensor)
+
+    def dag_penalty(self, penalty_type="notears", dagma_s=1.0):
+        if penalty_type == "notears":
+            return self.notears_dag_penalty()
+        if penalty_type == "dagma":
+            return self.dagma_dag_penalty(s=dagma_s)
+        raise ValueError("unknown DAG penalty type: {}".format(penalty_type))
 
     def _sample_ncm(self, n=None, u=None, do={}, evaluating=False):
         return self.ncm(
