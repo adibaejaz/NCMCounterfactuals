@@ -165,7 +165,13 @@ class MaskedRunTimeRunner(BaseRunner):
                 with open(f'{d}/{hyperparams["pipeline_choice"]}/hyperparams.json', 'w') as file:
                     new_hp = {k: str(v) for (k, v) in hyperparams.items()}
                     json.dump(new_hp, file)
-                T.save(m.get_mask().detach().cpu(), f'{d}/{hyperparams["pipeline_choice"]}/mask.th')
+                mask = m.get_mask().detach().cpu()
+                T.save(mask, f'{d}/{hyperparams["pipeline_choice"]}/mask.th')
+                with open(f'{d}/{hyperparams["pipeline_choice"]}/mask.json', 'w') as file:
+                    json.dump({
+                        'variables': list(m.ncm.v),
+                        'mask': mask.tolist(),
+                    }, file)
                 T.save(m.state_dict(), f'{d}/{hyperparams["pipeline_choice"]}/best.th')
 
                 return m, time_results

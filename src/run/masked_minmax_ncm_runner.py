@@ -214,8 +214,20 @@ class MaskedNCMMinMaxRunner(BaseRunner):
 
                         with open(f'{d}/{r}/results.json', 'w') as file:
                             json.dump(results, file)
-                        T.save(m_min.get_mask().detach().cpu(), f'{d}/{r}/mask_min.th')
-                        T.save(m_max.get_mask().detach().cpu(), f'{d}/{r}/mask_max.th')
+                        mask_min = m_min.get_mask().detach().cpu()
+                        mask_max = m_max.get_mask().detach().cpu()
+                        T.save(mask_min, f'{d}/{r}/mask_min.th')
+                        T.save(mask_max, f'{d}/{r}/mask_max.th')
+                        with open(f'{d}/{r}/mask_min.json', 'w') as file:
+                            json.dump({
+                                'variables': list(m_min.ncm.v),
+                                'mask': mask_min.tolist(),
+                            }, file)
+                        with open(f'{d}/{r}/mask_max.json', 'w') as file:
+                            json.dump({
+                                'variables': list(m_max.ncm.v),
+                                'mask': mask_max.tolist(),
+                            }, file)
                         T.save(m_min.state_dict(), f'{d}/{r}/best_min.th')
                         T.save(m_max.state_dict(), f'{d}/{r}/best_max.th')
                     else:

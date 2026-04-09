@@ -133,6 +133,10 @@ class MaskedNCMRunner(BaseRunner):
                     m.generator, m.ncm, hyperparams["do-var-list"], dat_sets,
                     n=1000000, query_track=hyperparams['eval-query'],
                     ncm_kwargs=self._ncm_kwargs(m))
+                dag_h = m.dag_penalty(
+                    penalty_type=m.cycle_penalty_type,
+                    dagma_s=m.dagma_s)
+                results["dag_h"] = dag_h.item() if T.is_tensor(dag_h) else dag_h
                 print(results)
 
                 with open(f'{d}/results.json', 'w') as file:
@@ -141,7 +145,13 @@ class MaskedNCMRunner(BaseRunner):
                     new_hp = {k: str(v) for (k, v) in hyperparams.items()}
                     json.dump(new_hp, file)
                 T.save(dat_sets, f'{d}/dat.th')
-                T.save(m.get_mask().detach().cpu(), f'{d}/mask.th')
+                mask = m.get_mask().detach().cpu()
+                T.save(mask, f'{d}/mask.th')
+                with open(f'{d}/mask.json', 'w') as file:
+                    json.dump({
+                        'variables': list(m.ncm.v),
+                        'mask': mask.tolist(),
+                    }, file)
                 T.save(m.state_dict(), f'{d}/best.th')
 
                 return m, results

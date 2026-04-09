@@ -35,7 +35,7 @@ architectures = {
 }
 
 gan_choices = {"vanilla", "bgan", "wgan", "wgangp"}
-valid_graphs = {"backdoor", "bow", "frontdoor", "napkin", "simple", "bdm", "med", "expl", "double_bow", "iv", "bad_fd",
+valid_graphs = {"backdoor", "bow", "frontdoor", "napkin", "simple", "chain", "bdm", "med", "expl", "double_bow", "iv", "bad_fd",
                 "extended_bow", "bad_m", "m",
                 "zid_a", "zid_b", "zid_c",
                 "gid_a", "gid_b", "gid_c", "gid_d",
@@ -43,9 +43,9 @@ valid_graphs = {"backdoor", "bow", "frontdoor", "napkin", "simple", "bdm", "med"
                 "expl_xm", "expl_xm_dox", "expl_xy", "expl_dox", "expl_xy_dox", "expl_my", "expl_my_dox"}
 
 graph_sets = {
-    "all": {"backdoor", "bow", "frontdoor", "napkin", "simple", "med", "expl", "zid_a", "zid_b", "zid_c",
+    "all": {"backdoor", "bow", "frontdoor", "napkin", "simple", "chain", "med", "expl", "zid_a", "zid_b", "zid_c",
             "gid_a", "gid_b", "gid_c", "gid_d"},
-    "standard": {"backdoor", "bow", "frontdoor", "napkin", "iv", "extended_bow", "m", "bad_m", "bdm"},
+    "standard": {"backdoor", "bow", "frontdoor", "napkin", "chain", "iv", "extended_bow", "m", "bad_m", "bdm"},
     "zid": {"zid_a", "zid_b", "zid_c"},
     "gid": {"gid_a", "gid_b", "gid_c", "gid_d"},
     "expl_set": {"expl", "expl_dox", "expl_xm", "expl_xm_dox", "expl_xy", "expl_xy_dox", "expl_my", "expl_my_dox"}

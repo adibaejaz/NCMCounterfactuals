@@ -7,7 +7,7 @@ from src.scm.ncm.masked_feedforward_ncm import MaskedFF_NCM
 from .base_pipeline import BasePipeline
 
 DEFAULT_CYCLE_LAMBDA = 0.0
-DEFAULT_CYCLE_PENALTY = "notears"
+DEFAULT_CYCLE_PENALTY = "dagma"
 DEFAULT_DAGMA_S = 1.0
 
 
