@@ -2,6 +2,7 @@ import torch as T
 
 import src.metric.divergences as dvg
 from src.metric.evaluation import all_metrics
+from src.scm.scm import expand_do
 from src.scm.masked_scm import (
     DEFAULT_GATE_SHARPNESS,
     DEFAULT_MASK_MODE,
@@ -84,12 +85,17 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
 
-        ncm_batch = self._sample_ncm(n=self.ncm_batch_size)
-        dat_mat = T.cat([batch[k] for k in self.ordered_v], axis=1)
-        ncm_mat = T.cat([ncm_batch[k] for k in self.ordered_v], axis=1)
-
         opt.zero_grad()
-        mmd_loss = dvg.MMD_loss(dat_mat.float(), ncm_mat.float(), gamma=1)
+        mmd_loss = 0.0
+        for i, do_set in enumerate(self.do_var_list):
+            ncm_batch = self._sample_ncm(
+                n=self.ncm_batch_size,
+                do={k: expand_do(v, n=self.ncm_batch_size).to(self.device)
+                    for (k, v) in do_set.items()}
+            )
+            dat_mat = T.cat([batch[i][k] for k in self.ordered_v], axis=1)
+            ncm_mat = T.cat([ncm_batch[k] for k in self.ordered_v], axis=1)
+            mmd_loss = mmd_loss + dvg.MMD_loss(dat_mat.float(), ncm_mat.float(), gamma=1) / len(self.do_var_list)
         cycle_loss = 0.0
         dag_h = 0.0
         if self.cycle_lambda > 0:

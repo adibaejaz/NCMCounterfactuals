@@ -1,14 +1,13 @@
-"""Runtime-focused runner for single-model NCM experiments.
+"""Runtime-focused runner for single-model masked NCM experiments.
 
-This runner is the timing-oriented path:
+This is the masked analogue of ``RunTimeRunner``:
 - generate or reuse one dataset
-- build one pipeline/model for a specific ``pipeline_choice``
+- build one masked pipeline/model for a specific ``pipeline_choice``
 - compute initial metrics for bookkeeping
 - train for a fixed number of epochs without early stopping
 - record wall-clock training time
 
-Unlike ``NCMRunner``, its main artifact is ``time_results.json`` rather than
-final post-training evaluation metrics.
+Its primary output is timing information, not final quality metrics.
 """
 
 import os
@@ -32,8 +31,8 @@ import random
 import time
 
 
-class RunTimeRunner(BaseRunner):
-    """Run a single-model experiment and track training runtime."""
+class MaskedRunTimeRunner(BaseRunner):
+    """Run a single-model masked experiment and track training runtime."""
 
     def __init__(self, pipeline, dat_model, ncm_model):
         super().__init__(pipeline, dat_model, ncm_model)
@@ -42,9 +41,7 @@ class RunTimeRunner(BaseRunner):
         checkpoint = pl.callbacks.ModelCheckpoint(dirpath=f'{directory}/{pipeline_choice}/checkpoints/',
                                                   monitor="train_loss")
         return pl.Trainer(
-            callbacks=[
-                checkpoint
-            ],
+            callbacks=[checkpoint],
             max_epochs=max_epochs,
             accumulate_grad_batches=1,
             logger=pl.loggers.TensorBoardLogger(f'{directory}/{pipeline_choice}/logs/'),
@@ -53,13 +50,19 @@ class RunTimeRunner(BaseRunner):
             gpus=gpu
         ), checkpoint
 
+    def _ncm_kwargs(self, pl_model):
+        return dict(
+            mask=pl_model.get_mask(),
+            use_dag_updates=pl_model.use_dag_updates,
+        )
+
     def run(self, exp_name, cg_file, n, dim, trial_index, hyperparams=None, gpu=None, data_bundle=None,
             lockinfo=os.environ.get('SLURM_JOB_ID', ''), verbose=False):
         if hyperparams is None:
             hyperparams = dict()
         key = self.get_key(cg_file, n, dim, trial_index)
         run_key = self.get_run_key(cg_file, n, dim, trial_index, hyperparams)
-        d = 'out/%s/%s' % (exp_name, run_key)  # name of the output directory
+        d = 'out/%s/%s' % (exp_name, run_key)
 
         with self.lock(f'{d}/lock', lockinfo) as acquired_lock:
             if not acquired_lock:
@@ -67,34 +70,18 @@ class RunTimeRunner(BaseRunner):
                 return
 
             try:
-                # return if best.th is generated (i.e. training is already complete)
                 if os.path.isfile(f'{d}/{hyperparams["pipeline_choice"]}/best.th'):
                     print('[done]', f'{d}/{hyperparams["pipeline_choice"]}')
                     return
 
-                # since training is not complete, delete all directory files except for the lock
                 print('[running]', d)
-                '''
-                for file in glob.glob(f'{d}/*'):
-                    if os.path.basename(file) != 'lock':
-                        if os.path.isdir(file):
-                            shutil.rmtree(file)
-                        else:
-                            try:
-                                os.remove(file)
-                            except FileNotFoundError:
-                                pass
-                                '''
 
-                # set random seed to a hash of the parameter settings for reproducibility
                 seed = int(hashlib.sha512(key.encode()).hexdigest(), 16) & 0xffffffff
-
                 if data_bundle is not None:
                     cg = data_bundle.cg
                     dat_m = data_bundle.dat_m
                     dat_sets = data_bundle.dat_sets
 
-                # ensure the positivity assumption holds
                 positivity = data_bundle is not None
                 while not positivity:
                     seed += 1
@@ -103,7 +90,6 @@ class RunTimeRunner(BaseRunner):
                     print('Key:', key)
                     print('Seed:', seed)
 
-                    # generate data-generating model, data, and model
                     print('Generating data')
                     cg = CausalGraph.read(cg_file)
                     v_sizes = {k: 1 if k in {'X', 'Y', 'M'} else dim for k in cg}
@@ -131,9 +117,9 @@ class RunTimeRunner(BaseRunner):
                             print(prob_table)
 
                         dat_sets.append(dat_m(n=n, do=expand_do_set))
+
                 m = self.pipeline(dat_m, hyperparams["do-var-list"], dat_sets, cg, dim, hyperparams=hyperparams,
                                   ncm_model=self.ncm_model)
-                # print info
                 print("Calculating metrics")
                 if data_bundle is None:
                     stored_metrics = dict()
@@ -146,15 +132,16 @@ class RunTimeRunner(BaseRunner):
                             dat=dat_sets[i])
                 else:
                     stored_metrics = dict(data_bundle.stored_metrics)
-                start_metrics = evaluation.all_metrics(m.generator, m.ncm, hyperparams["do-var-list"], dat_sets,
-                                                       n=1000000, stored=stored_metrics,
-                                                       query_track=hyperparams['eval-query'])
+                start_metrics = evaluation.all_metrics(
+                    m.generator, m.ncm, hyperparams["do-var-list"], dat_sets,
+                    n=1000000, stored=stored_metrics,
+                    query_track=hyperparams['eval-query'],
+                    ncm_kwargs=self._ncm_kwargs(m))
                 if hyperparams['query-track'] is not None:
                     true_q = 'true_{}'.format(evaluation.serialize_query(hyperparams['eval-query']))
                     stored_metrics[true_q] = start_metrics[true_q]
                 m.update_metrics(stored_metrics)
 
-                # train model
                 start = time.time()
                 if gpu is None:
                     gpu = int(T.cuda.is_available())
@@ -173,17 +160,16 @@ class RunTimeRunner(BaseRunner):
                     time_results = dict()
                 time_results[hyperparams["pipeline_choice"]] = time_cost
 
-                # save results
                 with open(f'{d}/time_results.json', 'w') as file:
                     json.dump(time_results, file)
                 with open(f'{d}/{hyperparams["pipeline_choice"]}/hyperparams.json', 'w') as file:
                     new_hp = {k: str(v) for (k, v) in hyperparams.items()}
                     json.dump(new_hp, file)
+                T.save(m.get_mask().detach().cpu(), f'{d}/{hyperparams["pipeline_choice"]}/mask.th')
                 T.save(m.state_dict(), f'{d}/{hyperparams["pipeline_choice"]}/best.th')
 
                 return m, time_results
             except Exception:
-                # move out/*/* to err/*/*/#
                 e = d.replace("out/", "err/").rsplit('-', 1)[0]
                 e_index = len(glob.glob(e + '/*'))
                 e += '/%s' % e_index

@@ -151,7 +151,18 @@ def all_metrics(
     return m
 
 
-def all_metrics_minmax(truth, ncm_min, ncm_max, dat_dos, dat_sets, n=1000000, stored=None, query_track=None):
+def all_metrics_minmax(
+        truth,
+        ncm_min,
+        ncm_max,
+        dat_dos,
+        dat_sets,
+        n=1000000,
+        stored=None,
+        query_track=None,
+        truth_kwargs=None,
+        ncm_min_kwargs=None,
+        ncm_max_kwargs=None):
     true_ps = dict()
     dat_ps = dict()
     m = dict()
@@ -177,18 +188,30 @@ def all_metrics_minmax(truth, ncm_min, ncm_max, dat_dos, dat_sets, n=1000000, st
         else:
             dat_ps[name] = stored[dat_name]
 
-        m["min_true_KL_{}".format(name)] = kl(truth, ncm_min, n=n, do=expanded_do_dat, true_pv=true_ps[name])
-        m["max_true_KL_{}".format(name)] = kl(truth, ncm_max, n=n, do=expanded_do_dat, true_pv=true_ps[name])
-        m["min_dat_KL_{}".format(name)] = kl(truth, ncm_min, n=n, do=expanded_do_dat, true_pv=dat_ps[name])
-        m["max_dat_KL_{}".format(name)] = kl(truth, ncm_max, n=n, do=expanded_do_dat, true_pv=dat_ps[name])
-        m["min_true_supnorm_{}".format(name)] = supremum_norm(truth, ncm_min, n=n, do=expanded_do_dat,
-                                                              true_pv=true_ps[name])
-        m["max_true_supnorm_{}".format(name)] = supremum_norm(truth, ncm_max, n=n, do=expanded_do_dat,
-                                                              true_pv=true_ps[name])
-        m["min_dat_supnorm_{}".format(name)] = supremum_norm(truth, ncm_min, n=n, do=expanded_do_dat,
-                                                             true_pv=dat_ps[name])
-        m["max_dat_supnorm_{}".format(name)] = supremum_norm(truth, ncm_max, n=n, do=expanded_do_dat,
-                                                             true_pv=dat_ps[name])
+        m["min_true_KL_{}".format(name)] = kl(
+            truth, ncm_min, n=n, do=expanded_do_dat, true_pv=true_ps[name],
+            truth_kwargs=truth_kwargs, ncm_kwargs=ncm_min_kwargs)
+        m["max_true_KL_{}".format(name)] = kl(
+            truth, ncm_max, n=n, do=expanded_do_dat, true_pv=true_ps[name],
+            truth_kwargs=truth_kwargs, ncm_kwargs=ncm_max_kwargs)
+        m["min_dat_KL_{}".format(name)] = kl(
+            truth, ncm_min, n=n, do=expanded_do_dat, true_pv=dat_ps[name],
+            truth_kwargs=truth_kwargs, ncm_kwargs=ncm_min_kwargs)
+        m["max_dat_KL_{}".format(name)] = kl(
+            truth, ncm_max, n=n, do=expanded_do_dat, true_pv=dat_ps[name],
+            truth_kwargs=truth_kwargs, ncm_kwargs=ncm_max_kwargs)
+        m["min_true_supnorm_{}".format(name)] = supremum_norm(
+            truth, ncm_min, n=n, do=expanded_do_dat, true_pv=true_ps[name],
+            truth_kwargs=truth_kwargs, ncm_kwargs=ncm_min_kwargs)
+        m["max_true_supnorm_{}".format(name)] = supremum_norm(
+            truth, ncm_max, n=n, do=expanded_do_dat, true_pv=true_ps[name],
+            truth_kwargs=truth_kwargs, ncm_kwargs=ncm_max_kwargs)
+        m["min_dat_supnorm_{}".format(name)] = supremum_norm(
+            truth, ncm_min, n=n, do=expanded_do_dat, true_pv=dat_ps[name],
+            truth_kwargs=truth_kwargs, ncm_kwargs=ncm_min_kwargs)
+        m["max_dat_supnorm_{}".format(name)] = supremum_norm(
+            truth, ncm_max, n=n, do=expanded_do_dat, true_pv=dat_ps[name],
+            truth_kwargs=truth_kwargs, ncm_kwargs=ncm_max_kwargs)
 
         m["min_total_true_KL"] += m["min_true_KL_{}".format(name)]
         m["min_total_dat_KL"] += m["min_dat_KL_{}".format(name)]
@@ -201,11 +224,12 @@ def all_metrics_minmax(truth, ncm_min, ncm_max, dat_dos, dat_sets, n=1000000, st
 
     if query_track is not None:
         true_q = 'true_{}'.format(serialize_query(query_track))
-        m[true_q] = eval_query(truth, query_track, n) if stored is None or true_q not in stored else stored[true_q]
+        m[true_q] = eval_query(
+            truth, query_track, n, model_kwargs=truth_kwargs) if stored is None or true_q not in stored else stored[true_q]
         min_ncm_q = 'min_ncm_{}'.format(serialize_query(query_track))
         max_ncm_q = 'max_ncm_{}'.format(serialize_query(query_track))
-        m[min_ncm_q] = eval_query(ncm_min, query_track, n)
-        m[max_ncm_q] = eval_query(ncm_max, query_track, n)
+        m[min_ncm_q] = eval_query(ncm_min, query_track, n, model_kwargs=ncm_min_kwargs)
+        m[max_ncm_q] = eval_query(ncm_max, query_track, n, model_kwargs=ncm_max_kwargs)
         min_err_q = 'min_err_ncm_{}'.format(serialize_query(query_track))
         max_err_q = 'max_err_ncm_{}'.format(serialize_query(query_track))
         m[min_err_q] = m[true_q] - m[min_ncm_q]

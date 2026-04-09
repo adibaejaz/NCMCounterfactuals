@@ -1,4 +1,6 @@
 import os
+import json
+import hashlib
 from tempfile import NamedTemporaryFile
 from contextlib import contextmanager
 
@@ -40,6 +42,31 @@ class BaseRunner:
         return ('gen=%s-graph=%s-n_samples=%s-dim=%s-trial_index=%s'
                 % (self.dat_model_name, graph, n, dim, trial_index))
 
-    def run(self, exp_name, cg_file, n, dim, trial_index, hyperparams=None, gpu=None,
+    def get_run_key(self, cg_file, n, dim, trial_index, hyperparams=None):
+        data_key = self.get_key(cg_file, n, dim, trial_index)
+        if hyperparams is None:
+            hyperparams = dict()
+        hp_payload = json.dumps({k: str(v) for (k, v) in hyperparams.items()}, sort_keys=True)
+        hp_hash = hashlib.sha256(
+            ("pipeline={}|ncm={}|hp={}".format(
+                self.pipeline_name, self.ncm_model_name, hp_payload)).encode()
+        ).hexdigest()[:12]
+        return "{}-run={}".format(data_key, hp_hash)
+
+    def _hash_to_seed(self, payload):
+        return int(hashlib.sha512(payload.encode()).hexdigest(), 16) & 0xffffffff
+
+    def get_data_seed(self, key):
+        return self._hash_to_seed("data|" + key)
+
+    def get_train_seed(self, key, hyperparams=None):
+        if hyperparams is None:
+            hyperparams = dict()
+        hp_payload = json.dumps({k: str(v) for (k, v) in hyperparams.items()}, sort_keys=True)
+        payload = "train|{}|pipeline={}|ncm={}|hp={}".format(
+            key, self.pipeline_name, self.ncm_model_name, hp_payload)
+        return self._hash_to_seed(payload)
+
+    def run(self, exp_name, cg_file, n, dim, trial_index, hyperparams=None, gpu=None, data_bundle=None,
             lockinfo=os.environ.get('SLURM_JOB_ID', ''), verbose=False):
         raise NotImplementedError()

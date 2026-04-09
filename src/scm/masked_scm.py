@@ -6,6 +6,8 @@ from typing import Dict, Literal, Mapping, Optional, Protocol, Sequence, Union
 import torch as T
 import torch.nn as nn
 
+from src.ds.counterfactual import CTF
+from .scm import check_equal, expand_do, log
 from .distribution.continuous_distribution import UniformDistribution
 from .distribution.distribution import Distribution
 
@@ -43,7 +45,7 @@ class MaskingRule(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def apply(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
+    def mask_input(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
         raise NotImplementedError()
 
     def edge_is_active(self, mask_value: T.Tensor) -> bool:
@@ -55,7 +57,7 @@ class ThresholdMaskingRule(MaskingRule):
         super().__init__()
         self.threshold = threshold
 
-    def apply(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
+    def mask_input(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
         if mask_value.detach().item() > self.threshold:
             return value
         return perp_value
@@ -65,7 +67,7 @@ class ThresholdMaskingRule(MaskingRule):
 
 
 class MultiplyMaskingRule(MaskingRule):
-    def apply(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
+    def mask_input(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
         mask_value = mask_value.to(device=value.device, dtype=value.dtype)
         return mask_value * value + (1 - mask_value) * perp_value
 
@@ -79,7 +81,7 @@ class GateMaskingRule(MaskingRule):
         self.threshold = threshold
         self.sharpness = sharpness
 
-    def apply(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
+    def mask_input(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
         gate = T.sigmoid(
             self.sharpness * (
                 mask_value.to(device=value.device, dtype=value.dtype) - self.threshold))
@@ -242,7 +244,7 @@ class MaskedSCM(nn.Module):
         """
         Apply the masking rule for a single directed input.
         """
-        return self.masking_rule.apply(mask_value, value, self._perp_like(value))
+        return self.masking_rule.mask_input(mask_value, value, self._perp_like(value))
 
     def _masked_inputs(self, k: str, v: Mapping[str, T.Tensor], mask: MaskTensor) -> TensorDict:
         """
@@ -503,6 +505,142 @@ class MaskedSCM(nn.Module):
 
     def convert_evaluation(self, samples: TensorDict) -> TensorDict:
         return samples
+
+    def query_loss(self, input, val):
+        if T.is_tensor(val):
+            raise NotImplementedError()
+        else:
+            if val == 1:
+                return T.sum(-log(input))
+            elif val == 0:
+                return T.sum(-log(1 - input))
+            else:
+                raise ValueError("Comparison to {} of type {} is not allowed.".format(val, type(val)))
+
+    def compute_ctf(
+            self,
+            query: CTF,
+            n: int = 1000000,
+            u: Optional[TensorDict] = None,
+            get_prob: bool = True,
+            evaluating: bool = False,
+            mask: Optional[MaskTensor] = None,
+            use_dag_updates: bool = DEFAULT_USE_DAG_UPDATES):
+        if mask is None:
+            raise ValueError("mask must be provided")
+
+        if u is None:
+            u = self.pu.sample(n)
+            n_new = n
+        else:
+            n_new = len(u[next(iter(u))])
+
+        for term in query.cond_term_set:
+            samples = self(
+                n=None,
+                u=u,
+                do={k: expand_do(v, n_new) for (k, v) in term.do_vals.items()},
+                select=term.vars,
+                evaluating=True,
+                mask=mask,
+                use_dag_updates=use_dag_updates,
+            )
+
+            cond_match = T.ones(n_new, dtype=T.bool)
+            for (k, v) in term.var_vals.items():
+                cond_match *= check_equal(samples[k], v)
+
+            u = {k: v[cond_match] for (k, v) in u.items()}
+            n_new = T.sum(cond_match.long()).item()
+
+        if n_new <= 0:
+            if evaluating:
+                return float('nan')
+            else:
+                return T.tensor([float('nan')]).to(self.device_param)
+
+        if evaluating:
+            match = T.ones(n_new, dtype=T.bool, requires_grad=False)
+            out_samples = dict()
+            for term in query.term_set:
+                expanded_do_terms = dict()
+                for (k, v) in term.do_vals.items():
+                    if k == "nested":
+                        expanded_do_terms.update(
+                            self.compute_ctf(
+                                v,
+                                u=u,
+                                get_prob=False,
+                                evaluating=evaluating,
+                                mask=mask,
+                                use_dag_updates=use_dag_updates,
+                            )
+                        )
+                    else:
+                        expanded_do_terms[k] = expand_do(v, n_new)
+                q_samples = self(
+                    n=None,
+                    u=u,
+                    do=expanded_do_terms,
+                    select=term.vars,
+                    evaluating=evaluating,
+                    mask=mask,
+                    use_dag_updates=use_dag_updates,
+                )
+
+                if get_prob:
+                    for (k, v) in term.var_vals.items():
+                        match *= check_equal(q_samples[k], v)
+                else:
+                    out_samples.update(q_samples)
+
+            if get_prob:
+                return (T.sum(match.long()) / match.shape[0]).item()
+            else:
+                return out_samples
+
+        else:
+            loss = 0
+            loss_count = 0
+            out_samples = dict()
+            for term in query.term_set:
+                expanded_do_terms = dict()
+                for (k, v) in term.do_vals.items():
+                    if k == "nested":
+                        expanded_do_terms.update(
+                            self.compute_ctf(
+                                v,
+                                u=u,
+                                get_prob=False,
+                                evaluating=evaluating,
+                                mask=mask,
+                                use_dag_updates=use_dag_updates,
+                            )
+                        )
+                    else:
+                        expanded_do_terms[k] = expand_do(v, n_new)
+
+                q_samples = self(
+                    n=None,
+                    u=u,
+                    do=expanded_do_terms,
+                    select=term.vars,
+                    evaluating=evaluating,
+                    mask=mask,
+                    use_dag_updates=use_dag_updates,
+                )
+
+                if get_prob:
+                    for (k, v) in term.var_vals.items():
+                        loss += self.query_loss(q_samples[k], v)
+                        loss_count += 1
+                else:
+                    out_samples.update(q_samples)
+
+            if get_prob:
+                return loss / (n_new * loss_count)
+            else:
+                return out_samples
 
     def forward(
             self,

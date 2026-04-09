@@ -131,3 +131,6 @@ dmypy.json
 
 # Bookkeeping files
 start.sh
+
+# Output files
+out/

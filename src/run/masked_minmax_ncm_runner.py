@@ -1,11 +1,12 @@
-"""Min-max runner for paired NCM experiments.
+"""Min-max runner for paired masked NCM experiments.
 
-This runner trains two pipelines on the same dataset:
-- a ``max`` model
-- a ``min`` model
+This is the masked analogue of ``NCMMinMaxRunner``:
+- train a ``max`` masked model
+- train a ``min`` masked model
+- evaluate both using mask-aware sampling
 
-It is used for paired experiments rather than the single-model quality or
-runtime workflows used by ``NCMRunner`` and ``RunTimeRunner``.
+It is intended for paired masked experiments rather than single-model quality
+or runtime runs.
 """
 
 import os
@@ -25,8 +26,8 @@ from src.scm.scm import expand_do
 from .base_runner import BaseRunner
 
 
-class NCMMinMaxRunner(BaseRunner):
-    """Run a paired min/max experiment and report metrics for both models."""
+class MaskedNCMMinMaxRunner(BaseRunner):
+    """Run a paired masked min/max experiment and report metrics for both models."""
 
     def __init__(self, pipeline, dat_model, ncm_model):
         super().__init__(pipeline, dat_model, ncm_model)
@@ -34,9 +35,7 @@ class NCMMinMaxRunner(BaseRunner):
     def create_trainer(self, directory, max_epochs, r, gpu=None):
         checkpoint = pl.callbacks.ModelCheckpoint(dirpath=f'{directory}/{r}/checkpoints/', monitor="train_loss")
         return pl.Trainer(
-            callbacks=[
-                checkpoint
-            ],
+            callbacks=[checkpoint],
             max_epochs=max_epochs,
             accumulate_grad_batches=1,
             logger=pl.loggers.TensorBoardLogger(f'{directory}/{r}/logs/'),
@@ -44,6 +43,12 @@ class NCMMinMaxRunner(BaseRunner):
             terminate_on_nan=True,
             gpus=gpu
         ), checkpoint
+
+    def _ncm_kwargs(self, pl_model):
+        return dict(
+            mask=pl_model.get_mask(),
+            use_dag_updates=pl_model.use_dag_updates,
+        )
 
     def print_metrics(self, pl_model, do_var_list, dat_sets, verbose=False, stored_metrics=None, query_track=None):
         if stored_metrics is None:
@@ -59,9 +64,11 @@ class NCMMinMaxRunner(BaseRunner):
                 stored_metrics["dat_{}".format(name)] = evaluation.probability_table(
                     pl_model.generator, n=1000000, do={k: expand_do(v, n=1000000) for (k, v) in dat_do_set.items()},
                     dat=dat_sets[i])
-        start_metrics = evaluation.all_metrics(pl_model.generator, pl_model.ncm, do_var_list, dat_sets,
-                                               n=1000000, stored=stored_metrics,
-                                               query_track=query_track)
+        start_metrics = evaluation.all_metrics(
+            pl_model.generator, pl_model.ncm, do_var_list, dat_sets,
+            n=1000000, stored=stored_metrics,
+            query_track=query_track,
+            ncm_kwargs=self._ncm_kwargs(pl_model))
         if verbose:
             print(start_metrics)
 
@@ -71,7 +78,6 @@ class NCMMinMaxRunner(BaseRunner):
                 stored_metrics[true_q] = start_metrics[true_q]
 
         pl_model.update_metrics(stored_metrics)
-
         return stored_metrics
 
     def run(self, exp_name, cg_file, n, dim, trial_index, hyperparams=None, gpu=None, data_bundle=None,
@@ -80,7 +86,7 @@ class NCMMinMaxRunner(BaseRunner):
             hyperparams = dict()
         key = self.get_key(cg_file, n, dim, trial_index)
         run_key = self.get_run_key(cg_file, n, dim, trial_index, hyperparams)
-        d = 'out/%s/%s' % (exp_name, run_key)  # name of the output directory
+        d = 'out/%s/%s' % (exp_name, run_key)
 
         with self.lock(f'{d}/lock', lockinfo) as acquired_lock:
             if not acquired_lock:
@@ -88,15 +94,12 @@ class NCMMinMaxRunner(BaseRunner):
                 return
 
             try:
-                # return if best.th is generated (i.e. training is already complete)
                 if os.path.isfile(f'{d}/best.th'):
                     print('[done]', d)
                     return
 
-                # set random seed to a hash of the parameter settings for reproducibility
                 seed = int(hashlib.sha512(key.encode()).hexdigest(), 16) & 0xffffffff
 
-                # ensure the positivity assumption holds
                 if data_bundle is not None:
                     cg = data_bundle.cg
                     dat_m = data_bundle.dat_m
@@ -110,7 +113,6 @@ class NCMMinMaxRunner(BaseRunner):
                     print('Key:', key)
                     print('Seed:', seed)
 
-                    # generate data-generating model, data, and model
                     print('Generating data')
                     cg = CausalGraph.read(cg_file)
                     v_sizes = {k: 1 if k in {'X', 'Y', 'M', 'W'} else dim for k in cg}
@@ -122,7 +124,6 @@ class NCMMinMaxRunner(BaseRunner):
                     else:
                         dat_m = self.dat_model(cg, dim=dim, seed=seed)
 
-                    # checks if the data has already been generated
                     if os.path.isfile(f'{d}/dat.th'):
                         dat_sets = T.load(f'{d}/dat.th')
                         positivity = True
@@ -146,7 +147,6 @@ class NCMMinMaxRunner(BaseRunner):
                             dat_sets.append(dat_m(n=n, do=expand_do_set))
 
                         positivity = all_positive
-
                         if positivity:
                             T.save(dat_sets, f'{d}/dat.th')
 
@@ -160,7 +160,6 @@ class NCMMinMaxRunner(BaseRunner):
                 for r in range(hyperparams.get("id-reruns", 1)):
                     os.makedirs(f'{d}/{r}/', exist_ok=True)
                     if not os.path.isfile(f'{d}/{r}/best_max.th'):
-                        # remove all files
                         for file in glob.glob(f'{d}/{r}/*'):
                             if os.path.isdir(file):
                                 shutil.rmtree(file)
@@ -170,7 +169,6 @@ class NCMMinMaxRunner(BaseRunner):
                                 except FileNotFoundError:
                                     pass
 
-                        # reset seed
                         new_key = "{}-run={}".format(key, r)
                         seed = int(hashlib.sha512(new_key.encode()).hexdigest(), 16) & 0xffffffff
                         T.manual_seed(seed)
@@ -184,46 +182,48 @@ class NCMMinMaxRunner(BaseRunner):
                                               hyperparams=hyperparams, ncm_model=self.ncm_model,
                                               max_query=hyperparams.get('max-query-2', None))
 
-                        # train models
-                        trainer_max, checkpoint_max = self.create_trainer(d, hyperparams.get('max-query-iters', 3000),
-                                                                          r, gpu)
-                        trainer_min, checkpoint_min = self.create_trainer(d, hyperparams.get('max-query-iters', 3000),
-                                                                          r, gpu)
+                        trainer_max, checkpoint_max = self.create_trainer(
+                            d, hyperparams.get('max-query-iters', 3000), r, gpu)
+                        trainer_min, checkpoint_min = self.create_trainer(
+                            d, hyperparams.get('max-query-iters', 3000), r, gpu)
 
                         print("\nTraining max model...")
-                        stored_metrics = self.print_metrics(m_max, hyperparams['do-var-list'], dat_sets,
-                                                            verbose=verbose, stored_metrics=stored_metrics,
-                                                            query_track=hyperparams['eval-query'])
+                        stored_metrics = self.print_metrics(
+                            m_max, hyperparams['do-var-list'], dat_sets,
+                            verbose=verbose, stored_metrics=stored_metrics,
+                            query_track=hyperparams['eval-query'])
                         trainer_max.fit(m_max)
                         ckpt_max = T.load(checkpoint_max.best_model_path)
                         m_max.load_state_dict(ckpt_max['state_dict'])
 
                         print("\nTraining min model...")
-                        stored_metrics = self.print_metrics(m_min, hyperparams['do-var-list'], dat_sets,
-                                                            verbose=verbose, stored_metrics=stored_metrics,
-                                                            query_track=hyperparams['eval-query'])
+                        stored_metrics = self.print_metrics(
+                            m_min, hyperparams['do-var-list'], dat_sets,
+                            verbose=verbose, stored_metrics=stored_metrics,
+                            query_track=hyperparams['eval-query'])
                         trainer_min.fit(m_min)
                         ckpt_min = T.load(checkpoint_min.best_model_path)
                         m_min.load_state_dict(ckpt_min['state_dict'])
 
                         results = evaluation.all_metrics_minmax(
                             m_max.generator, m_min.ncm, m_max.ncm, hyperparams['do-var-list'], dat_sets,
-                            n=100000, query_track=hyperparams['eval-query'])
+                            n=100000, query_track=hyperparams['eval-query'],
+                            ncm_min_kwargs=self._ncm_kwargs(m_min),
+                            ncm_max_kwargs=self._ncm_kwargs(m_max))
                         print(results)
 
-                        # save results
                         with open(f'{d}/{r}/results.json', 'w') as file:
                             json.dump(results, file)
+                        T.save(m_min.get_mask().detach().cpu(), f'{d}/{r}/mask_min.th')
+                        T.save(m_max.get_mask().detach().cpu(), f'{d}/{r}/mask_max.th')
                         T.save(m_min.state_dict(), f'{d}/{r}/best_min.th')
                         T.save(m_max.state_dict(), f'{d}/{r}/best_max.th')
-
                     else:
                         print("Done with run {}".format(r))
 
-                T.save(dict(), f'{d}/best.th')  # breadcrumb file
+                T.save(dict(), f'{d}/best.th')
                 return True
             except Exception:
-                # move out/*/* to err/*/*/#
                 e = d.replace("out/", "err/").rsplit('-', 1)[0]
                 e_index = len(glob.glob(e + '/*'))
                 e += '/%s' % e_index
