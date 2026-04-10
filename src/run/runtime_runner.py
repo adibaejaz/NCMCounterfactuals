@@ -40,7 +40,7 @@ class RunTimeRunner(BaseRunner):
 
     def create_trainer(self, directory, max_epochs, pipeline_choice, gpu=None):
         checkpoint = pl.callbacks.ModelCheckpoint(dirpath=f'{directory}/{pipeline_choice}/checkpoints/',
-                                                  monitor="train_loss")
+                                                  monitor="train_loss", save_last=True)
         return pl.Trainer(
             callbacks=[
                 checkpoint
@@ -72,8 +72,8 @@ class RunTimeRunner(BaseRunner):
                     print('[done]', f'{d}/{hyperparams["pipeline_choice"]}')
                     return
 
-                # since training is not complete, delete all directory files except for the lock
-                print('[running]', d)
+                resume_ckpt = self.get_latest_checkpoint(f'{d}/{hyperparams["pipeline_choice"]}')
+                print('[resuming]' if resume_ckpt is not None else '[running]', d)
                 '''
                 for file in glob.glob(f'{d}/*'):
                     if os.path.basename(file) != 'lock':
@@ -160,7 +160,7 @@ class RunTimeRunner(BaseRunner):
                     gpu = int(T.cuda.is_available())
                 trainer, checkpoint = self.create_trainer(d, hyperparams.get('max-iters', 100),
                                                           hyperparams['pipeline_choice'], gpu)
-                trainer.fit(m)
+                trainer.fit(m, ckpt_path=resume_ckpt)
                 ckpt = T.load(checkpoint.best_model_path)
                 m.load_state_dict(ckpt['state_dict'])
                 end = time.time()

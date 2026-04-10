@@ -1,6 +1,7 @@
 import os
 import json
 import hashlib
+import glob
 from tempfile import NamedTemporaryFile
 from contextlib import contextmanager
 
@@ -66,6 +67,15 @@ class BaseRunner:
         payload = "train|{}|pipeline={}|ncm={}|hp={}".format(
             key, self.pipeline_name, self.ncm_model_name, hp_payload)
         return self._hash_to_seed(payload)
+
+    def get_latest_checkpoint(self, directory):
+        checkpoints = glob.glob(os.path.join(directory, "checkpoints", "*.ckpt"))
+        if not checkpoints:
+            return None
+        last_ckpt = os.path.join(directory, "checkpoints", "last.ckpt")
+        if os.path.isfile(last_ckpt):
+            return last_ckpt
+        return max(checkpoints, key=os.path.getmtime)
 
     def run(self, exp_name, cg_file, n, dim, trial_index, hyperparams=None, gpu=None, data_bundle=None,
             lockinfo=os.environ.get('SLURM_JOB_ID', ''), verbose=False):

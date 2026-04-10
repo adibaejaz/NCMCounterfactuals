@@ -35,7 +35,11 @@ class MaskedNCMRunner(BaseRunner):
         super().__init__(pipeline, dat_model, ncm_model)
 
     def create_trainer(self, directory, gpu=None):
-        checkpoint = pl.callbacks.ModelCheckpoint(dirpath=f'{directory}/checkpoints/', monitor="train_loss")
+        checkpoint = pl.callbacks.ModelCheckpoint(
+            dirpath=f'{directory}/checkpoints/',
+            monitor="train_loss",
+            save_last=True,
+        )
         return pl.Trainer(
             callbacks=[
                 checkpoint,
@@ -76,16 +80,8 @@ class MaskedNCMRunner(BaseRunner):
                     print('[done]', d)
                     return
 
-                print('[running]', d)
-                for file in glob.glob(f'{d}/*'):
-                    if os.path.basename(file) != 'lock':
-                        if os.path.isdir(file):
-                            shutil.rmtree(file)
-                        else:
-                            try:
-                                os.remove(file)
-                            except FileNotFoundError:
-                                pass
+                resume_ckpt = self.get_latest_checkpoint(d)
+                print('[resuming]' if resume_ckpt is not None else '[running]', d)
 
                 data_seed = self.get_data_seed(key)
                 train_seed = self.get_train_seed(key, hyperparams)
@@ -126,7 +122,7 @@ class MaskedNCMRunner(BaseRunner):
                 if gpu is None:
                     gpu = int(T.cuda.is_available())
                 trainer, checkpoint = self.create_trainer(d, gpu)
-                trainer.fit(m)
+                trainer.fit(m, ckpt_path=resume_ckpt)
                 ckpt = T.load(checkpoint.best_model_path)
                 m.load_state_dict(ckpt['state_dict'])
                 results = evaluation.all_metrics(

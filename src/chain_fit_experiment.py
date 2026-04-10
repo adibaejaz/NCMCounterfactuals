@@ -129,7 +129,7 @@ def main():
     parser.add_argument("--mask-init-high", type=float, default=0.75)
     parser.add_argument("--mask-fixed-zero", action="append", default=[],
                         help="edge to constrain to 0, formatted as SRC->DST; may be repeated")
-    parser.add_argument("--cycle-penalty", default="notears", choices=["notears", "dagma"])
+    parser.add_argument("--cycle-penalty", default="dagma", choices=["notears", "dagma"])
     parser.add_argument("--dagma-s", type=float, default=1.0)
 
     parser.add_argument("--verbose", action="store_true")

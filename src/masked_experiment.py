@@ -117,7 +117,7 @@ parser.add_argument('--mask-fixed-zero', action='append', default=[],
                     help="edge to constrain to 0, formatted as SRC->DST; may be repeated")
 parser.add_argument('--cycle-lambda', type=float, default=0.0,
                     help="weight on the DAG penalty")
-parser.add_argument('--cycle-penalty', default="notears", choices=["notears", "dagma"],
+parser.add_argument('--cycle-penalty', default="dagma", choices=["notears", "dagma"],
                     help="DAG penalty type")
 parser.add_argument('--dagma-s', type=float, default=1.0,
                     help="DAGMA log-det scale parameter")
