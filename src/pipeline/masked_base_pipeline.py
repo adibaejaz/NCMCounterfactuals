@@ -23,11 +23,18 @@ class MaskedBasePipeline(BasePipeline):
             batch_size=256,
             init_mask=None,
             learn_mask=True,
+            fixed_zero_edges=None,
+            fixed_zero_mask=None,
             mask_init_mode="constant",
             mask_init_value=0.5,
             mask_init_range=(0.25, 0.75),
             use_dag_updates=DEFAULT_USE_DAG_UPDATES):
         super().__init__(generator, do_var_list, dat_sets, cg, dim, ncm, batch_size=batch_size)
+
+        self.fixed_zero_mask = self._build_fixed_zero_mask(
+            fixed_zero_edges=fixed_zero_edges,
+            fixed_zero_mask=fixed_zero_mask,
+        )
 
         if init_mask is None:
             init_mask = self._init_mask(
@@ -35,7 +42,7 @@ class MaskedBasePipeline(BasePipeline):
                 value=mask_init_value,
                 value_range=mask_init_range)
 
-        init_mask = init_mask.float()
+        init_mask = (init_mask.float() * self.fixed_zero_mask.cpu())
         if learn_mask:
             eps = 1e-6
             init_logits = logit(init_mask.clamp(min=eps, max=1 - eps))
@@ -45,6 +52,31 @@ class MaskedBasePipeline(BasePipeline):
 
         self.learn_mask = learn_mask
         self.use_dag_updates = use_dag_updates
+
+    def _build_fixed_zero_mask(self, fixed_zero_edges=None, fixed_zero_mask=None):
+        n = len(self.ncm.v)
+        mask = T.ones((n, n), dtype=T.float)
+
+        eye = T.eye(n, dtype=T.float)
+        mask = mask * (1 - eye)
+
+        if fixed_zero_mask is not None:
+            fixed_zero_mask = fixed_zero_mask.float()
+            if fixed_zero_mask.shape != (n, n):
+                raise ValueError(
+                    "fixed_zero_mask must have shape ({}, {}), got {}".format(
+                        n, n, tuple(fixed_zero_mask.shape)))
+            mask = mask * fixed_zero_mask
+
+        if fixed_zero_edges is not None:
+            v2i = {v: i for i, v in enumerate(self.ncm.v)}
+            for src, dst in fixed_zero_edges:
+                if src not in v2i or dst not in v2i:
+                    raise ValueError("unknown fixed-zero edge {} -> {}".format(src, dst))
+                mask[v2i[src], v2i[dst]] = 0.0
+
+        self.register_buffer("fixed_zero_mask", mask)
+        return self.fixed_zero_mask
 
     def _init_mask(self, mode="constant", value=0.5, value_range=(0.25, 0.75)):
         n = len(self.ncm.v)
@@ -69,11 +101,7 @@ class MaskedBasePipeline(BasePipeline):
             mask = T.sigmoid(self.mask_parameter)
         else:
             mask = self.mask_parameter
-        eye = T.eye(
-            mask.shape[0],
-            device=mask.device,
-            dtype=mask.dtype)
-        return mask * (1 - eye)
+        return mask * self.fixed_zero_mask.to(device=mask.device, dtype=mask.dtype)
 
     def get_edge_scores(self):
         return self.get_mask()

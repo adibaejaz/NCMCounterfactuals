@@ -59,6 +59,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             batch_size=hyperparams.get('data-bs', 1000),
             init_mask=hyperparams.get('init-mask', None),
             learn_mask=hyperparams.get('learn-mask', True),
+            fixed_zero_edges=hyperparams.get('mask-fixed-zero-edges', None),
+            fixed_zero_mask=hyperparams.get('mask-fixed-zero-mask', None),
             mask_init_mode=hyperparams.get('mask-init-mode', 'constant'),
             mask_init_value=hyperparams.get('mask-init-value', 0.5),
             mask_init_range=hyperparams.get('mask-init-range', (0.25, 0.75)),

@@ -113,6 +113,8 @@ parser.add_argument('--mask-init-low', type=float, default=0.25,
                     help="lower bound for uniform mask initialization")
 parser.add_argument('--mask-init-high', type=float, default=0.75,
                     help="upper bound for uniform mask initialization")
+parser.add_argument('--mask-fixed-zero', action='append', default=[],
+                    help="edge to constrain to 0, formatted as SRC->DST; may be repeated")
 parser.add_argument('--cycle-lambda', type=float, default=0.0,
                     help="weight on the DAG penalty")
 parser.add_argument('--cycle-penalty', default="notears", choices=["notears", "dagma"],
@@ -134,6 +136,20 @@ def _print_query_info(eval_query):
     for quer, sig in eval_query:
         print("{} {} ".format(sign_char[sig], quer), end="")
     print("\n")
+
+
+def _parse_fixed_zero_edges(specs):
+    edges = []
+    for spec in specs:
+        if "->" not in spec:
+            raise ValueError("fixed-zero edge '{}' must have form SRC->DST".format(spec))
+        src, dst = spec.split("->", 1)
+        src = src.strip()
+        dst = dst.strip()
+        if not src or not dst:
+            raise ValueError("fixed-zero edge '{}' must have non-empty SRC and DST".format(spec))
+        edges.append((src, dst))
+    return edges
 
 
 def main():
@@ -189,6 +205,7 @@ def main():
         'mask-init-mode': args.mask_init_mode,
         'mask-init-value': args.mask_init_value,
         'mask-init-range': (args.mask_init_low, args.mask_init_high),
+        'mask-fixed-zero-edges': _parse_fixed_zero_edges(args.mask_fixed_zero),
         'cycle-lambda': args.cycle_lambda,
         'cycle-penalty': args.cycle_penalty,
         'dagma-s': args.dagma_s,
