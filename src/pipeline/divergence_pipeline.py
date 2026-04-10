@@ -6,6 +6,7 @@ import src.metric.divergences as dvg
 from src.metric.evaluation import all_metrics
 from src.ds.causal_graph import CausalGraph
 from src.scm.ncm.feedforward_ncm import FF_NCM
+from src.scm.scm import expand_do
 
 from .base_pipeline import BasePipeline
 
@@ -42,14 +43,17 @@ class DivergencePipeline(BasePipeline):
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
-        ncm_n = self.ncm_batch_size
-
-        ncm_batch = self.ncm(ncm_n)
-        dat_mat = T.cat([batch[k] for k in self.ordered_v], axis=1)
-        ncm_mat = T.cat([ncm_batch[k] for k in self.ordered_v], axis=1)
 
         opt.zero_grad()
-        loss = dvg.MMD_loss(dat_mat.float(), ncm_mat, gamma=1)
+        loss = 0.0
+        for i, do_set in enumerate(self.do_var_list):
+            ncm_batch = self.ncm(
+                self.ncm_batch_size,
+                do={k: expand_do(v, n=self.ncm_batch_size).to(self.device) for (k, v) in do_set.items()},
+            )
+            dat_mat = T.cat([batch[i][k] for k in self.ordered_v], axis=1)
+            ncm_mat = T.cat([ncm_batch[k] for k in self.ordered_v], axis=1)
+            loss = loss + dvg.MMD_loss(dat_mat.float(), ncm_mat.float(), gamma=1) / len(self.do_var_list)
         loss_val = loss.item()
         self.manual_backward(loss)
         opt.step()
@@ -60,8 +64,14 @@ class DivergencePipeline(BasePipeline):
         # logging
         if (self.current_epoch + 1) % 10 == 0:
             if not self.logged:
-                results = all_metrics(self.generator, self.ncm, self.dat,
-                                             self.cg, n=10000, stored=self.stored_metrics)
+                results = all_metrics(
+                    self.generator,
+                    self.ncm,
+                    self.do_var_list,
+                    self.dat_sets,
+                    n=10000,
+                    stored=self.stored_metrics,
+                )
                 for k, v in results.items():
                     self.log(k, v)
 
