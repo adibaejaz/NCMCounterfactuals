@@ -121,6 +121,8 @@ parser.add_argument('--cycle-penalty', default="dagma", choices=["notears", "dag
                     help="DAG penalty type")
 parser.add_argument('--dagma-s', type=float, default=1.0,
                     help="DAGMA log-det scale parameter")
+parser.add_argument('--mask-l1-lambda', type=float, default=1.0,
+                    help="weight on L1 regularization of realized mask entries; set to 0 to disable")
 
 parser.add_argument('--verbose', action="store_true", help="print more information")
 
@@ -209,6 +211,7 @@ def main():
         'cycle-lambda': args.cycle_lambda,
         'cycle-penalty': args.cycle_penalty,
         'dagma-s': args.dagma_s,
+        'mask-l1-lambda': args.mask_l1_lambda,
     }
 
     if graph_choice in graph_sets:

@@ -70,6 +70,7 @@ def _masked_hyperparams(shared_hp, args, mask_mode, cycle_lambda):
         "cycle-lambda": cycle_lambda,
         "cycle-penalty": args.cycle_penalty,
         "dagma-s": args.dagma_s,
+        "mask-l1-lambda": args.mask_l1_lambda,
     })
     return hp
 
@@ -131,6 +132,7 @@ def main():
                         help="edge to constrain to 0, formatted as SRC->DST; may be repeated")
     parser.add_argument("--cycle-penalty", default="dagma", choices=["notears", "dagma"])
     parser.add_argument("--dagma-s", type=float, default=1.0)
+    parser.add_argument("--mask-l1-lambda", type=float, default=1.0)
 
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()

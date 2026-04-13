@@ -9,6 +9,7 @@ from .base_pipeline import BasePipeline
 DEFAULT_CYCLE_LAMBDA = 0.0
 DEFAULT_CYCLE_PENALTY = "dagma"
 DEFAULT_DAGMA_S = 1.0
+DEFAULT_MASK_L1_LAMBDA = 1.0
 
 
 class MaskedBasePipeline(BasePipeline):
@@ -106,12 +107,22 @@ class MaskedBasePipeline(BasePipeline):
     def get_edge_scores(self):
         return self.get_mask()
 
+    def mask_l1_penalty(self):
+        return self.get_mask().abs().sum()
+
+    def get_dagma_edge_scores(self, eps=1e-8):
+        edge_scores = self.get_edge_scores()
+        scale = edge_scores.abs().sum()
+        if scale.item() <= eps:
+            return edge_scores
+        return edge_scores / scale.clamp_min(eps)
+
     def notears_dag_penalty(self):
         edge_scores = self.get_edge_scores()
         return T.trace(T.matrix_exp(edge_scores)) - edge_scores.shape[0]
 
     def dagma_dag_penalty(self, s=1.0):
-        edge_scores = self.get_edge_scores()
+        edge_scores = self.get_dagma_edge_scores()
         d = edge_scores.shape[0]
         identity = T.eye(d, device=edge_scores.device, dtype=edge_scores.dtype)
         s_tensor = T.tensor(float(s), device=edge_scores.device, dtype=edge_scores.dtype)

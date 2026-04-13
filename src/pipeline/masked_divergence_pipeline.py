@@ -18,6 +18,7 @@ from .masked_base_pipeline import (
     DEFAULT_CYCLE_LAMBDA,
     DEFAULT_CYCLE_PENALTY,
     DEFAULT_DAGMA_S,
+    DEFAULT_MASK_L1_LAMBDA,
     MaskedBasePipeline,
 )
 
@@ -72,6 +73,7 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.cycle_lambda = hyperparams.get('cycle-lambda', DEFAULT_CYCLE_LAMBDA)
         self.cycle_penalty_type = hyperparams.get('cycle-penalty', DEFAULT_CYCLE_PENALTY)
         self.dagma_s = hyperparams.get('dagma-s', DEFAULT_DAGMA_S)
+        self.mask_l1_lambda = hyperparams.get('mask-l1-lambda', DEFAULT_MASK_L1_LAMBDA)
         self.ordered_v = cg.v
         self.logged = False
         self.automatic_optimization = False
@@ -100,16 +102,20 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             mmd_loss = mmd_loss + dvg.MMD_loss(dat_mat.float(), ncm_mat.float(), gamma=1) / len(self.do_var_list)
         cycle_loss = 0.0
         dag_h = 0.0
+        mask_l1 = self.mask_l1_penalty()
+        mask_l1_loss = self.mask_l1_lambda * mask_l1
         if self.cycle_lambda > 0:
             dag_h = self.dag_penalty(
                 penalty_type=self.cycle_penalty_type,
                 dagma_s=self.dagma_s)
             cycle_loss = self.cycle_lambda * dag_h
-        loss = mmd_loss + cycle_loss
+        loss = mmd_loss + cycle_loss + mask_l1_loss
         loss_val = loss.item()
         mmd_loss_val = mmd_loss.item()
         cycle_loss_val = cycle_loss.item() if T.is_tensor(cycle_loss) else cycle_loss
         dag_h_val = dag_h.item() if T.is_tensor(dag_h) else dag_h
+        mask_l1_val = mask_l1.item()
+        mask_l1_loss_val = mask_l1_loss.item()
         self.manual_backward(loss)
         opt.step()
 
@@ -117,6 +123,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.log('mmd_loss', mmd_loss_val, prog_bar=True)
         self.log('dag_h', dag_h_val, prog_bar=True)
         self.log('cycle_loss', cycle_loss_val, prog_bar=True)
+        self.log('mask_l1', mask_l1_val, prog_bar=True)
+        self.log('mask_l1_loss', mask_l1_loss_val, prog_bar=True)
         self.log('lr', opt.param_groups[0]['lr'], prog_bar=True)
 
         if (self.current_epoch + 1) % 10 == 0:
