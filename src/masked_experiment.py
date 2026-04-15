@@ -17,11 +17,11 @@ import argparse
 import numpy as np
 import torch as T
 
-from src.ds import CTF
+from src.ds import CTF, CTFTerm
 from src.ds.causal_graph import CausalGraph
 from src.metric.queries import get_query, get_experimental_variables, is_q_id_in_G
 from src.pipeline import MaskedDivergencePipeline
-from src.run import MaskedNCMRunner
+from src.run import MaskedNCMMinMaxRunner, MaskedNCMRunner
 from src.scm.ctm import CTM
 from src.scm.masked_scm import (
     DEFAULT_GATE_SHARPNESS,
@@ -84,7 +84,18 @@ parser.add_argument('--scale-regions', action="store_true", help="scale regions 
 parser.add_argument('--gen-bs', type=int, default=10000, help="batch size of ctm data generation (default: 10000)")
 parser.add_argument('--no-positivity', action="store_true", help="does not enforce positivity for ID experiments")
 
-parser.add_argument('--query-track', default="ate", help="choice of query to track")
+parser.add_argument("--query-track", default="ate", help="choice of query to track")
+parser.add_argument("--bound-query", action="store_true", help="run a masked min-max bound experiment for P(Y=1 | do(Z=z))")
+parser.add_argument("--bound-treatment", default="Z", help="treatment variable for bound experiments")
+parser.add_argument("--bound-outcome", default="Y", help="outcome variable for bound experiments")
+parser.add_argument("--bound-outcome-value", type=int, default=1, help="outcome value for bound experiments")
+parser.add_argument("--bound-treatment-value", action="append", type=int, default=[],
+                    help="treatment value for bound experiments; may be repeated")
+parser.add_argument("--id-reruns", type=int, default=1, help="number of min-max reruns")
+parser.add_argument("--max-query-iters", type=int, default=3000, help="number of min-max training epochs")
+parser.add_argument("--max-lambda", type=float, default=1.0, help="initial query regularization weight")
+parser.add_argument("--min-lambda", type=float, default=0.001, help="final query regularization weight")
+parser.add_argument("--mc-sample-size", type=int, default=10000, help="sample size for query optimization")
 
 parser.add_argument('--graph', '-G', default="standard", help="name of preset graph")
 parser.add_argument('--n-trials', '-t', type=int, default=1, help="number of trials")
@@ -154,22 +165,53 @@ def _parse_fixed_zero_edges(specs):
     return edges
 
 
+def _build_bound_queries(treatment_var, treatment_value, outcome_var, outcome_value):
+    eval_query = CTF(
+        {CTFTerm({outcome_var}, {treatment_var: treatment_value}, {outcome_var: outcome_value})},
+        set(),
+        name="P({}={} | do({}={}))".format(outcome_var, outcome_value, treatment_var, treatment_value),
+    )
+    opt_query = (
+        eval_query,
+        CTF(
+            {CTFTerm({outcome_var}, {treatment_var: treatment_value}, {outcome_var: 1 - outcome_value})},
+            set(),
+            name="P({}={} | do({}={}))".format(outcome_var, 1 - outcome_value, treatment_var, treatment_value),
+        ),
+    )
+    query_bounds = {
+        "outcome_var": outcome_var,
+        "outcome_value": outcome_value,
+        "treatment_var": treatment_var,
+        "treatment_values": (treatment_value,),
+    }
+    return eval_query, opt_query, query_bounds
+
+
+def _graph_has_vars(graph_name, required_vars):
+    cg = CausalGraph.read("dat/cg/{}.cg".format(graph_name))
+    return set(required_vars).issubset(set(cg.v))
+
+
 def main():
     args = parser.parse_args()
 
     gen_choice = args.gen.lower()
     graph_choice = args.graph.lower()
-    query_track = args.query_track.lower() if args.query_track is not None else None
+    bound_mode = args.bound_query
+    query_track = args.query_track.lower() if args.query_track is not None and not bound_mode else None
 
     assert gen_choice in valid_generators
     assert graph_choice in valid_graphs or graph_choice in graph_sets
-    assert query_track is None or query_track in valid_queries
+    assert bound_mode or query_track is None or query_track in valid_queries
     assert not (args.learn_mask and args.fixed_mask)
+    assert args.bound_outcome_value in {0, 1}
 
     pipeline = MaskedDivergencePipeline
     dat_model = valid_generators[gen_choice]
     ncm_model = MaskedFF_NCM
-    runner = MaskedNCMRunner(pipeline, dat_model, ncm_model)
+    runner_cls = MaskedNCMMinMaxRunner if bound_mode else MaskedNCMRunner
+    runner = runner_cls(pipeline, dat_model, ncm_model)
 
     gpu_used = 0 if args.gpu is None else [int(args.gpu)]
 
@@ -212,12 +254,28 @@ def main():
         'cycle-penalty': args.cycle_penalty,
         'dagma-s': args.dagma_s,
         'mask-l1-lambda': args.mask_l1_lambda,
+        'id-reruns': args.id_reruns,
+        'max-query-iters': args.max_query_iters,
+        'max-lambda': args.max_lambda,
+        'min-lambda': args.min_lambda,
+        'mc-sample-size': args.mc_sample_size,
     }
 
     if graph_choice in graph_sets:
-        graph_set = {graph for graph in graph_sets[graph_choice] if is_q_id_in_G(graph, query_track)}
+        if bound_mode:
+            graph_set = {
+                graph for graph in graph_sets[graph_choice]
+                if _graph_has_vars(graph, {args.bound_treatment, args.bound_outcome})
+            }
+        else:
+            graph_set = {graph for graph in graph_sets[graph_choice] if is_q_id_in_G(graph, query_track)}
     else:
+        if bound_mode and not _graph_has_vars(graph_choice, {args.bound_treatment, args.bound_outcome}):
+            raise ValueError("graph {} does not contain {} and {}".format(graph_choice, args.bound_treatment, args.bound_outcome))
         graph_set = {graph_choice}
+
+    if bound_mode and not graph_set:
+        raise ValueError("no selected graphs contain {} and {}".format(args.bound_treatment, args.bound_outcome))
 
     if args.n_samples == -1:
         n_list = 10.0 ** np.linspace(3, 5, 5)
@@ -229,49 +287,77 @@ def main():
     else:
         d_list = [args.dim]
 
+    bound_values = args.bound_treatment_value if args.bound_treatment_value else [0, 1]
+
     for graph in graph_set:
         do_var_list = get_experimental_variables(graph)
-        eval_query, _ = get_query(graph, query_track)
+        if bound_mode:
+            query_jobs = [
+                _build_bound_queries(
+                    args.bound_treatment,
+                    treatment_value,
+                    args.bound_outcome,
+                    args.bound_outcome_value,
+                )
+                for treatment_value in bound_values
+            ]
+        else:
+            eval_query, _ = get_query(graph, query_track)
+            query_jobs = [(eval_query, (None, None), None)]
 
-        hyperparams['do-var-list'] = do_var_list
-        hyperparams['eval-query'] = eval_query
+        for eval_query, opt_queries, query_bounds in query_jobs:
+            hyperparams["do-var-list"] = do_var_list
+            hyperparams["eval-query"] = eval_query
+            hyperparams["query-track"] = eval_query.name if bound_mode else query_track
+            if bound_mode:
+                hyperparams["max-query-1"] = opt_queries[0]
+                hyperparams["max-query-2"] = opt_queries[1]
+                hyperparams["query-bound-spec"] = query_bounds
+            else:
+                hyperparams.pop("max-query-1", None)
+                hyperparams.pop("max-query-2", None)
+                hyperparams.pop("query-bound-spec", None)
 
-        if args.verbose:
-            print("========== {} ==========".format(graph.upper()))
-            print("Do Set: {}".format(do_var_list))
-            _print_query_info(eval_query)
+            if args.verbose:
+                print("========== {} ==========".format(graph.upper()))
+                print("Do Set: {}".format(do_var_list))
+                _print_query_info(eval_query)
+                if bound_mode:
+                    print("Max Query: {}".format(opt_queries[0]))
+                    print("Min Query: {}".format(opt_queries[1]))
+                    print()
 
-        for (n, d) in itertools.product(n_list, d_list):
-            n = int(n)
-            hyperparams["data-bs"] = min(arg_data_bs, n)
-            hyperparams["ncm-bs"] = min(arg_ncm_bs, n)
+            for (n, d) in itertools.product(n_list, d_list):
+                n = int(n)
+                hyperparams["data-bs"] = min(arg_data_bs, n)
+                hyperparams["ncm-bs"] = min(arg_ncm_bs, n)
 
-            if arg_data_bs == -1:
-                hyperparams["data-bs"] = n // 10
-            if arg_ncm_bs == -1:
-                hyperparams["ncm-bs"] = n // 10
+                if arg_data_bs == -1:
+                    hyperparams["data-bs"] = n // 10
+                if arg_ncm_bs == -1:
+                    hyperparams["ncm-bs"] = n // 10
 
-            if hyperparams["full-batch"]:
-                hyperparams["data-bs"] = n
-                hyperparams["ncm-bs"] = n
+                if hyperparams["full-batch"]:
+                    hyperparams["data-bs"] = n
+                    hyperparams["ncm-bs"] = n
 
-            for i in range(args.n_trials):
-                cg_file = "dat/cg/{}.cg".format(graph)
-                try:
-                    if not runner.run(
-                            args.name,
-                            cg_file,
-                            n,
-                            d,
-                            i,
-                            hyperparams=hyperparams,
-                            gpu=gpu_used,
-                            verbose=args.verbose):
-                        break
-                except Exception as e:
-                    print(e)
-                    print('[failed]', i, args.name)
-                    raise
+                for i in range(args.n_trials):
+                    cg_file = "dat/cg/{}.cg".format(graph)
+                    try:
+                        if not runner.run(
+                                args.name,
+                                cg_file,
+                                n,
+                                d,
+                                i,
+                                hyperparams=hyperparams,
+                                gpu=gpu_used,
+                                verbose=args.verbose):
+                            continue
+                    except Exception as e:
+                        print(e)
+                        print("[failed]", i, args.name)
+                        raise
 
 
 if __name__ == "__main__":

@@ -250,7 +250,7 @@ for graph in graph_set:
                         runner = NCMMinMaxRunner(pipeline, dat_model, ncm_model)
                         if not runner.run("{}/{}".format(args.name, graph), cg_file, n, d, i,
                                           hyperparams=hyperparams, gpu=gpu_used, verbose=args.verbose):
-                            break
+                            continue
                 except Exception as e:
                     print(e)
                     print('[failed]', i, args.name)

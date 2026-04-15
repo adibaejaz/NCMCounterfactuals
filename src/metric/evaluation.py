@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import torch as T
 
-from src.scm.scm import expand_do
+from src.scm.scm import check_equal, expand_do
 from src.ds import CTF, CTFTerm
 
 
@@ -89,6 +89,98 @@ def serialize_query(query):
     return str(query)
 
 
+def serialize_probability(var_vals, cond_vals=None, do_vals=None):
+    event = ", ".join("{}={}".format(k, v) for (k, v) in sorted(var_vals.items()))
+    prefix = "P({}".format(event)
+    clauses = []
+    if cond_vals:
+        clauses.append(", ".join("{}={}".format(k, v) for (k, v) in sorted(cond_vals.items())))
+    if do_vals:
+        clauses.append("do({})".format(
+            ", ".join("{}={}".format(k, v) for (k, v) in sorted(do_vals.items()))))
+    if clauses:
+        return prefix + " | " + ", ".join(clauses) + ")"
+    return prefix + ")"
+
+
+def event_probability(m=None, event=None, given=None, n=1000000, do=None, dat=None, model_kwargs=None):
+    assert event is not None and len(event) > 0
+    assert m is not None or dat is not None
+
+    if given is None:
+        given = dict()
+    if do is None:
+        do = dict()
+    if model_kwargs is None:
+        model_kwargs = dict()
+
+    if dat is None:
+        dat = m(n, do=do, evaluating=True, **model_kwargs)
+
+    total = len(dat[next(iter(dat))])
+    match = T.ones(total, dtype=T.bool)
+    for (k, v) in given.items():
+        match = match & check_equal(dat[k], v)
+
+    match_count = int(match.long().sum().item())
+    if match_count == 0:
+        return float("nan")
+
+    for (k, v) in event.items():
+        match = match & check_equal(dat[k], v)
+
+    return (match.float().sum() / match_count).item()
+
+
+def scm_query_bound_metrics(
+        truth,
+        outcome_var="Y",
+        outcome_value=1,
+        treatment_var="Z",
+        treatment_values=(0, 1),
+        n=1000000,
+        stored=None,
+        truth_kwargs=None):
+    metrics = dict()
+    outcome_event = {outcome_var: outcome_value}
+    marginal_name = serialize_probability(outcome_event)
+    marginal_key = "true_{}".format(marginal_name)
+
+    if stored is not None and marginal_key in stored:
+        p_y = stored[marginal_key]
+    else:
+        p_y = event_probability(
+            truth,
+            event=outcome_event,
+            n=n,
+            model_kwargs=truth_kwargs)
+    metrics[marginal_key] = p_y
+
+    for treatment_value in treatment_values:
+        cond_name = serialize_probability(
+            outcome_event,
+            cond_vals={treatment_var: treatment_value})
+        cond_key = "true_{}".format(cond_name)
+        if stored is not None and cond_key in stored:
+            p_y_given_z = stored[cond_key]
+        else:
+            p_y_given_z = event_probability(
+                truth,
+                event=outcome_event,
+                given={treatment_var: treatment_value},
+                n=n,
+                model_kwargs=truth_kwargs)
+        metrics[cond_key] = p_y_given_z
+
+        do_name = serialize_probability(
+            outcome_event,
+            do_vals={treatment_var: treatment_value})
+        metrics["true_lower_{}".format(do_name)] = min(p_y, p_y_given_z)
+        metrics["true_upper_{}".format(do_name)] = max(p_y, p_y_given_z)
+
+    return metrics
+
+
 def all_metrics(
         truth,
         ncm,
@@ -160,6 +252,7 @@ def all_metrics_minmax(
         n=1000000,
         stored=None,
         query_track=None,
+        query_bounds=None,
         truth_kwargs=None,
         ncm_min_kwargs=None,
         ncm_max_kwargs=None):
@@ -236,6 +329,26 @@ def all_metrics_minmax(
         m[max_err_q] = m[true_q] - m[max_ncm_q]
         minmax_gap = 'minmax_{}_gap'.format(serialize_query(query_track))
         m[minmax_gap] = m[max_ncm_q] - m[min_ncm_q]
+
+    if query_bounds is not None:
+        bound_metrics = scm_query_bound_metrics(
+            truth,
+            n=n,
+            stored=stored,
+            truth_kwargs=truth_kwargs,
+            **query_bounds)
+        m.update(bound_metrics)
+
+        if query_track is not None:
+            query_name = serialize_query(query_track)
+            lower_key = "true_lower_{}".format(query_name)
+            upper_key = "true_upper_{}".format(query_name)
+            min_ncm_q = "min_ncm_{}".format(query_name)
+            max_ncm_q = "max_ncm_{}".format(query_name)
+            if lower_key in m and min_ncm_q in m:
+                m["err_min_ncm_{}_lower_bound".format(query_name)] = m[lower_key] - m[min_ncm_q]
+            if upper_key in m and max_ncm_q in m:
+                m["err_max_ncm_{}_upper_bound".format(query_name)] = m[upper_key] - m[max_ncm_q]
     return m
 
 

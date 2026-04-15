@@ -1,6 +1,8 @@
+import numpy as np
 import torch as T
 
 import src.metric.divergences as dvg
+from src.ds.counterfactual import CTF
 from src.metric.evaluation import all_metrics
 from src.scm.scm import expand_do
 from src.scm.masked_scm import (
@@ -34,7 +36,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             cg,
             dim,
             hyperparams=None,
-            ncm_model=MaskedFF_NCM):
+            ncm_model=MaskedFF_NCM,
+            max_query=None):
         if hyperparams is None:
             hyperparams = dict()
 
@@ -68,8 +71,16 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             use_dag_updates=hyperparams.get('use-dag-updates', DEFAULT_USE_DAG_UPDATES),
         )
 
-        self.ncm_batch_size = hyperparams.get('ncm-bs', 1000)
-        self.lr = hyperparams.get('lr', 0.001)
+        if isinstance(max_query, CTF):
+            self.max_query = [max_query]
+        else:
+            self.max_query = max_query
+        self.ncm_batch_size = hyperparams.get("ncm-bs", 1000)
+        self.lr = hyperparams.get("lr", 0.001)
+        self.max_query_iters = hyperparams.get("max-query-iters", 3000)
+        self.mc_sample_size = hyperparams.get("mc-sample-size", 10000)
+        self.min_lambda = hyperparams.get("min-lambda", 0.001)
+        self.max_lambda = hyperparams.get("max-lambda", 1.0)
         self.cycle_lambda = hyperparams.get('cycle-lambda', DEFAULT_CYCLE_LAMBDA)
         self.cycle_penalty_type = hyperparams.get('cycle-penalty', DEFAULT_CYCLE_PENALTY)
         self.dagma_s = hyperparams.get('dagma-s', DEFAULT_DAGMA_S)
@@ -81,10 +92,23 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
     def configure_optimizers(self):
         optim = T.optim.AdamW(self.parameters(), lr=self.lr)
         return {
-            'optimizer': optim,
-            'lr_scheduler': T.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            "optimizer": optim,
+            "lr_scheduler": T.optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 optim, 50, 1, eta_min=1e-4)
         }
+
+    def _get_q_loss(self):
+        query_loss = 0
+        for query in self.max_query:
+            cur_loss = self.ncm.compute_ctf(
+                query,
+                n=self.mc_sample_size,
+                mask=self.get_mask(),
+                use_dag_updates=self.use_dag_updates)
+            if T.isnan(cur_loss):
+                return cur_loss
+            query_loss += cur_loss
+        return query_loss
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
@@ -100,6 +124,11 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             dat_mat = T.cat([batch[i][k] for k in self.ordered_v], axis=1)
             ncm_mat = T.cat([ncm_batch[k] for k in self.ordered_v], axis=1)
             mmd_loss = mmd_loss + dvg.MMD_loss(dat_mat.float(), ncm_mat.float(), gamma=1) / len(self.do_var_list)
+        reg_ratio = min(self.current_epoch, self.max_query_iters) / self.max_query_iters
+        reg_up = np.log(self.max_lambda)
+        reg_low = np.log(self.min_lambda)
+        max_reg = np.exp(reg_up - reg_ratio * (reg_up - reg_low))
+
         cycle_loss = 0.0
         dag_h = 0.0
         mask_l1 = self.mask_l1_penalty()
@@ -109,23 +138,32 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
                 penalty_type=self.cycle_penalty_type,
                 dagma_s=self.dagma_s)
             cycle_loss = self.cycle_lambda * dag_h
-        loss = mmd_loss + cycle_loss + mask_l1_loss
+
+        q_loss = 0.0
+        if self.max_query is not None:
+            query_objective = self._get_q_loss()
+            if not T.isnan(query_objective):
+                q_loss = -max_reg * query_objective
+
+        loss = mmd_loss + cycle_loss + mask_l1_loss + q_loss
         loss_val = loss.item()
         mmd_loss_val = mmd_loss.item()
         cycle_loss_val = cycle_loss.item() if T.is_tensor(cycle_loss) else cycle_loss
         dag_h_val = dag_h.item() if T.is_tensor(dag_h) else dag_h
         mask_l1_val = mask_l1.item()
         mask_l1_loss_val = mask_l1_loss.item()
+        q_loss_val = q_loss.item() if T.is_tensor(q_loss) else q_loss
         self.manual_backward(loss)
         opt.step()
 
-        self.log('train_loss', loss_val, prog_bar=True)
-        self.log('mmd_loss', mmd_loss_val, prog_bar=True)
-        self.log('dag_h', dag_h_val, prog_bar=True)
-        self.log('cycle_loss', cycle_loss_val, prog_bar=True)
-        self.log('mask_l1', mask_l1_val, prog_bar=True)
-        self.log('mask_l1_loss', mask_l1_loss_val, prog_bar=True)
-        self.log('lr', opt.param_groups[0]['lr'], prog_bar=True)
+        self.log("train_loss", loss_val, prog_bar=True)
+        self.log("mmd_loss", mmd_loss_val, prog_bar=True)
+        self.log("dag_h", dag_h_val, prog_bar=True)
+        self.log("cycle_loss", cycle_loss_val, prog_bar=True)
+        self.log("mask_l1", mask_l1_val, prog_bar=True)
+        self.log("mask_l1_loss", mask_l1_loss_val, prog_bar=True)
+        self.log("Q_loss", q_loss_val, prog_bar=True)
+        self.log("lr", opt.param_groups[0]["lr"], prog_bar=True)
 
         if (self.current_epoch + 1) % 10 == 0:
             if not self.logged:

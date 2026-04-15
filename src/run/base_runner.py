@@ -6,6 +6,46 @@ from tempfile import NamedTemporaryFile
 from contextlib import contextmanager
 
 
+def _stable_jsonable(value):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(k): _stable_jsonable(v)
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, list):
+        return [_stable_jsonable(v) for v in value]
+    if isinstance(value, tuple):
+        return {
+            "__type__": "tuple",
+            "items": [_stable_jsonable(v) for v in value],
+        }
+    if isinstance(value, (set, frozenset)):
+        items = [_stable_jsonable(v) for v in value]
+        items.sort(key=lambda item: json.dumps(item, sort_keys=True))
+        return {
+            "__type__": "set",
+            "items": items,
+        }
+    if hasattr(value, "detach") and hasattr(value, "cpu") and hasattr(value, "tolist"):
+        return {
+            "__type__": type(value).__name__,
+            "items": _stable_jsonable(value.detach().cpu().tolist()),
+        }
+    if hasattr(value, "__dict__"):
+        payload = {
+            k: _stable_jsonable(v)
+            for k, v in sorted(vars(value).items(), key=lambda item: item[0])
+            if not k.startswith("_")
+        }
+        return {
+            "__type__": type(value).__name__,
+            "attrs": payload,
+        }
+    return repr(value)
+
+
 class BaseRunner:
     def __init__(self, pipeline, dat_model, ncm_model):
         self.pipeline = pipeline
@@ -43,11 +83,14 @@ class BaseRunner:
         return ('gen=%s-graph=%s-n_samples=%s-dim=%s-trial_index=%s'
                 % (self.dat_model_name, graph, n, dim, trial_index))
 
-    def get_run_key(self, cg_file, n, dim, trial_index, hyperparams=None):
-        data_key = self.get_key(cg_file, n, dim, trial_index)
+    def _stable_hyperparams_payload(self, hyperparams=None):
         if hyperparams is None:
             hyperparams = dict()
-        hp_payload = json.dumps({k: str(v) for (k, v) in hyperparams.items()}, sort_keys=True)
+        return json.dumps(_stable_jsonable(hyperparams), sort_keys=True)
+
+    def get_run_key(self, cg_file, n, dim, trial_index, hyperparams=None):
+        data_key = self.get_key(cg_file, n, dim, trial_index)
+        hp_payload = self._stable_hyperparams_payload(hyperparams)
         hp_hash = hashlib.sha256(
             ("pipeline={}|ncm={}|hp={}".format(
                 self.pipeline_name, self.ncm_model_name, hp_payload)).encode()
@@ -61,9 +104,7 @@ class BaseRunner:
         return self._hash_to_seed("data|" + key)
 
     def get_train_seed(self, key, hyperparams=None):
-        if hyperparams is None:
-            hyperparams = dict()
-        hp_payload = json.dumps({k: str(v) for (k, v) in hyperparams.items()}, sort_keys=True)
+        hp_payload = self._stable_hyperparams_payload(hyperparams)
         payload = "train|{}|pipeline={}|ncm={}|hp={}".format(
             key, self.pipeline_name, self.ncm_model_name, hp_payload)
         return self._hash_to_seed(payload)

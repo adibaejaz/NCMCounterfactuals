@@ -50,7 +50,7 @@ class MaskedNCMMinMaxRunner(BaseRunner):
             use_dag_updates=pl_model.use_dag_updates,
         )
 
-    def print_metrics(self, pl_model, do_var_list, dat_sets, verbose=False, stored_metrics=None, query_track=None):
+    def print_metrics(self, pl_model, do_var_list, dat_sets, verbose=False, stored_metrics=None, query_track=None, query_bounds=None):
         if stored_metrics is None:
             stored_metrics = dict()
 
@@ -64,6 +64,14 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                 stored_metrics["dat_{}".format(name)] = evaluation.probability_table(
                     pl_model.generator, n=1000000, do={k: expand_do(v, n=1000000) for (k, v) in dat_do_set.items()},
                     dat=dat_sets[i])
+
+        if query_bounds is not None:
+            stored_metrics.update(evaluation.scm_query_bound_metrics(
+                pl_model.generator,
+                n=1000000,
+                stored=stored_metrics,
+                **query_bounds))
+
         start_metrics = evaluation.all_metrics(
             pl_model.generator, pl_model.ncm, do_var_list, dat_sets,
             n=1000000, stored=stored_metrics,
@@ -191,7 +199,8 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                         stored_metrics = self.print_metrics(
                             m_max, hyperparams['do-var-list'], dat_sets,
                             verbose=verbose, stored_metrics=stored_metrics,
-                            query_track=hyperparams['eval-query'])
+                            query_track=hyperparams["eval-query"],
+                            query_bounds=hyperparams.get("query-bound-spec"))
                         trainer_max.fit(m_max)
                         ckpt_max = T.load(checkpoint_max.best_model_path)
                         m_max.load_state_dict(ckpt_max['state_dict'])
@@ -200,14 +209,16 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                         stored_metrics = self.print_metrics(
                             m_min, hyperparams['do-var-list'], dat_sets,
                             verbose=verbose, stored_metrics=stored_metrics,
-                            query_track=hyperparams['eval-query'])
+                            query_track=hyperparams["eval-query"],
+                            query_bounds=hyperparams.get("query-bound-spec"))
                         trainer_min.fit(m_min)
                         ckpt_min = T.load(checkpoint_min.best_model_path)
                         m_min.load_state_dict(ckpt_min['state_dict'])
 
                         results = evaluation.all_metrics_minmax(
-                            m_max.generator, m_min.ncm, m_max.ncm, hyperparams['do-var-list'], dat_sets,
-                            n=100000, query_track=hyperparams['eval-query'],
+                            m_max.generator, m_min.ncm, m_max.ncm, hyperparams["do-var-list"], dat_sets,
+                            n=100000, stored=stored_metrics, query_track=hyperparams["eval-query"],
+                            query_bounds=hyperparams.get("query-bound-spec"),
                             ncm_min_kwargs=self._ncm_kwargs(m_min),
                             ncm_max_kwargs=self._ncm_kwargs(m_max))
                         print(results)
