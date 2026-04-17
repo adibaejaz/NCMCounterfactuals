@@ -140,6 +140,8 @@ parser.add_argument('--theta-steps-per-mask', type=int, default=5,
                     help="number of theta-only updates per mask phase in alternating optimization")
 parser.add_argument('--mask-steps-per-theta', type=int, default=1,
                     help="number of mask-only updates per theta phase in alternating optimization")
+parser.add_argument('--log-grad-norms', action="store_true",
+                    help="log mask/theta gradient norm diagnostics during training")
 
 parser.add_argument('--verbose', action="store_true", help="print more information")
 
@@ -267,6 +269,7 @@ def main():
         'alt-opt': args.alt_opt,
         'theta-steps-per-mask': args.theta_steps_per_mask,
         'mask-steps-per-theta': args.mask_steps_per_theta,
+        'log-grad-norms': args.log_grad_norms,
         'id-reruns': args.id_reruns,
         'max-query-iters': args.max_query_iters,
         'max-lambda': args.max_lambda,

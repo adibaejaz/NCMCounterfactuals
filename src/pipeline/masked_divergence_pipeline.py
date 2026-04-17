@@ -28,6 +28,27 @@ from .masked_base_pipeline import (
 class MaskedDivergencePipeline(MaskedBasePipeline):
     patience = 50
 
+    def _mask_grad_norm(self, loss):
+        if not self.learn_mask or not T.is_tensor(loss):
+            return 0.0
+        grad = T.autograd.grad(loss, self.mask_parameter, retain_graph=True, allow_unused=True)[0]
+        if grad is None:
+            return 0.0
+        return grad.norm().detach().item()
+
+    def _theta_grad_norm(self, loss):
+        if not T.is_tensor(loss):
+            return 0.0
+        theta_params = [param for param in self.theta_parameters() if param.requires_grad]
+        if not theta_params:
+            return 0.0
+        grads = T.autograd.grad(loss, theta_params, retain_graph=True, allow_unused=True)
+        squared_norm = 0.0
+        for grad in grads:
+            if grad is not None:
+                squared_norm += grad.pow(2).sum().detach().item()
+        return squared_norm ** 0.5
+
     def __init__(
             self,
             generator,
@@ -84,6 +105,7 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.alt_opt = hyperparams.get("alt-opt", False)
         self.theta_steps_per_mask = hyperparams.get("theta-steps-per-mask", 5)
         self.mask_steps_per_theta = hyperparams.get("mask-steps-per-theta", 1)
+        self.log_grad_norms = hyperparams.get("log-grad-norms", False)
         self.cycle_lambda = hyperparams.get('cycle-lambda', DEFAULT_CYCLE_LAMBDA)
         self.cycle_penalty_type = hyperparams.get('cycle-penalty', DEFAULT_CYCLE_PENALTY)
         self.dagma_s = hyperparams.get('dagma-s', DEFAULT_DAGMA_S)
@@ -195,6 +217,14 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         q_loss_val = q_loss.item() if T.is_tensor(q_loss) else q_loss
         objective_loss_val = objective_loss.item()
         structure_loss_val = structure_loss.item() if T.is_tensor(structure_loss) else structure_loss
+        if self.log_grad_norms:
+            mask_fit_grad_norm = self._mask_grad_norm(mmd_loss)
+            mask_query_grad_norm = self._mask_grad_norm(q_loss)
+            mask_dag_grad_norm = self._mask_grad_norm(cycle_loss)
+            mask_total_grad_norm = self._mask_grad_norm(loss)
+            theta_fit_grad_norm = self._theta_grad_norm(mmd_loss)
+            theta_query_grad_norm = self._theta_grad_norm(q_loss)
+            theta_total_grad_norm = self._theta_grad_norm(loss)
         self.manual_backward(loss)
         active_opt.step()
 
@@ -211,6 +241,14 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.log("mask_l1", mask_l1_val, prog_bar=True)
         self.log("mask_l1_loss", mask_l1_loss_val, prog_bar=True)
         self.log("Q_loss", q_loss_val, prog_bar=True)
+        if self.log_grad_norms:
+            self.log("mask_fit_grad_norm", mask_fit_grad_norm, prog_bar=False)
+            self.log("mask_query_grad_norm", mask_query_grad_norm, prog_bar=False)
+            self.log("mask_dag_grad_norm", mask_dag_grad_norm, prog_bar=False)
+            self.log("mask_total_grad_norm", mask_total_grad_norm, prog_bar=False)
+            self.log("theta_fit_grad_norm", theta_fit_grad_norm, prog_bar=False)
+            self.log("theta_query_grad_norm", theta_query_grad_norm, prog_bar=False)
+            self.log("theta_total_grad_norm", theta_total_grad_norm, prog_bar=False)
         self.log("phase_is_mask", 1 if phase == "mask" else 0, prog_bar=True)
         if phase == "mask":
             self.log("train_loss_mask", loss_val, prog_bar=False)
