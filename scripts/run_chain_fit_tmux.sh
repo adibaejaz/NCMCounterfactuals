@@ -46,7 +46,7 @@ launch_run() {
 for trial in $(seq 0 $((N_TRIALS - 1))); do
   gpu="${GPUS[$((job_index % ${#GPUS[@]}))]}"
   session="chain_base_t${trial}"
-  cmd="$PYTHON_BIN -m src.main ${EXP_ROOT}/baseline divergence --graph chain --n-samples ${N_SAMPLES} --n-trials 1 -d 1 --query-track ate"
+  cmd="$PYTHON_BIN -m src.main ${EXP_ROOT}/baseline divergence --graph chain --n-samples ${N_SAMPLES} --n-trials 1 -d 1 --query-track ate --gpu 0"
   launch_run "$session" "$gpu" "$cmd"
   job_index=$((job_index + 1))
 
@@ -55,7 +55,7 @@ for trial in $(seq 0 $((N_TRIALS - 1))); do
       gpu="${GPUS[$((job_index % ${#GPUS[@]}))]}"
       cycle_tag="${cycle_lambda/./p}"
       session="chain_${mask_mode}_c${cycle_tag}_t${trial}"
-      cmd="$PYTHON_BIN -m src.masked_experiment ${EXP_ROOT}/masked_${mask_mode}_cycle${cycle_tag} --graph chain --n-samples ${N_SAMPLES} --n-trials 1 -d 1 --query-track ate --mask-mode ${mask_mode} --learn-mask --cycle-lambda ${cycle_lambda} --mask-fixed-zero Z->Y --mask-fixed-zero Y->Z"
+      cmd="$PYTHON_BIN -m src.masked_experiment ${EXP_ROOT}/masked_${mask_mode}_cycle${cycle_tag} --graph chain --n-samples ${N_SAMPLES} --n-trials 1 -d 1 --query-track ate --gpu 0 --mask-mode ${mask_mode} --learn-mask --cycle-lambda ${cycle_lambda} --dagma-s 2.0 --mask-init-value 0.1 --mask-fixed-zero Z->Y --mask-fixed-zero Y->Z"
       launch_run "$session" "$gpu" "$cmd"
       job_index=$((job_index + 1))
     done
