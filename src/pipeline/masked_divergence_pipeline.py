@@ -178,7 +178,7 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         if self.max_query is not None:
             query_objective = self._get_q_loss()
             if not T.isnan(query_objective):
-                q_loss = -max_reg * query_objective
+                q_loss = max_reg * query_objective
 
         objective_loss = mmd_loss + q_loss
         structure_loss = cycle_loss + mask_l1_loss

@@ -121,7 +121,7 @@ class MLEPipeline(BasePipeline):
         if self.max_query is not None:
             q_loss = 0
             for query in self.max_query:
-                q_loss -= self.ncm.compute_ctf(query, n=self.mc_sample_size)
+                q_loss += self.ncm.compute_ctf(query, n=self.mc_sample_size)
             q_loss = max_reg * q_loss
             q_loss_record = q_loss.item()
             self.manual_backward(q_loss)

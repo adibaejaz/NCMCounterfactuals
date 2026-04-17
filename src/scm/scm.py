@@ -152,7 +152,7 @@ class SCM(nn.Module):
             else:
                 return out_samples
         
-        else:
+        else: # training mode
             loss = 0
             loss_count = 0
             out_samples = dict()
