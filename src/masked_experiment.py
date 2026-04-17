@@ -134,6 +134,20 @@ parser.add_argument('--dagma-s', type=float, default=1.0,
                     help="DAGMA log-det scale parameter")
 parser.add_argument('--mask-l1-lambda', type=float, default=1.0,
                     help="weight on L1 regularization of realized mask entries; set to 0 to disable")
+parser.add_argument('--dag-alm', action="store_true",
+                    help="use a simplified augmented Lagrangian for the NOTEARS acyclicity constraint")
+parser.add_argument('--alm-alpha-init', type=float, default=0.0,
+                    help="initial dual variable for the DAG augmented Lagrangian")
+parser.add_argument('--alm-rho-init', type=float, default=1.0,
+                    help="initial quadratic penalty weight for the DAG augmented Lagrangian")
+parser.add_argument('--alm-rho-mult', type=float, default=5.0,
+                    help="multiplicative increase for the DAG augmented Lagrangian penalty weight")
+parser.add_argument('--alm-rho-max', type=float, default=1e4,
+                    help="maximum quadratic penalty weight for the DAG augmented Lagrangian")
+parser.add_argument('--alm-update-every', type=int, default=50,
+                    help="epochs between DAG augmented Lagrangian dual updates")
+parser.add_argument('--alm-improve-ratio', type=float, default=0.9,
+                    help="required relative improvement in dag_h before keeping the current ALM penalty weight")
 parser.add_argument('--alt-opt', action="store_true",
                     help="alternate updates between neural parameters and the mask")
 parser.add_argument('--theta-steps-per-mask', type=int, default=5,
@@ -218,6 +232,12 @@ def main():
     assert args.theta_steps_per_mask >= 0
     assert args.mask_steps_per_theta >= 0
     assert (args.theta_steps_per_mask + args.mask_steps_per_theta) > 0
+    assert args.alm_rho_init > 0
+    assert args.alm_rho_mult >= 1.0
+    assert args.alm_rho_max >= args.alm_rho_init
+    assert args.alm_update_every > 0
+    assert 0 < args.alm_improve_ratio <= 1.0
+    assert not args.dag_alm or args.cycle_penalty == "notears"
 
     pipeline = MaskedDivergencePipeline
     dat_model = valid_generators[gen_choice]
@@ -266,6 +286,13 @@ def main():
         'cycle-penalty': args.cycle_penalty,
         'dagma-s': args.dagma_s,
         'mask-l1-lambda': args.mask_l1_lambda,
+        'dag-alm': args.dag_alm,
+        'alm-alpha-init': args.alm_alpha_init,
+        'alm-rho-init': args.alm_rho_init,
+        'alm-rho-mult': args.alm_rho_mult,
+        'alm-rho-max': args.alm_rho_max,
+        'alm-update-every': args.alm_update_every,
+        'alm-improve-ratio': args.alm_improve_ratio,
         'alt-opt': args.alt_opt,
         'theta-steps-per-mask': args.theta_steps_per_mask,
         'mask-steps-per-theta': args.mask_steps_per_theta,

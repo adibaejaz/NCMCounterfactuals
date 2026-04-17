@@ -106,13 +106,23 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.theta_steps_per_mask = hyperparams.get("theta-steps-per-mask", 5)
         self.mask_steps_per_theta = hyperparams.get("mask-steps-per-theta", 1)
         self.log_grad_norms = hyperparams.get("log-grad-norms", False)
+        self.dag_alm = hyperparams.get("dag-alm", False)
         self.cycle_lambda = hyperparams.get('cycle-lambda', DEFAULT_CYCLE_LAMBDA)
         self.cycle_penalty_type = hyperparams.get('cycle-penalty', DEFAULT_CYCLE_PENALTY)
         self.dagma_s = hyperparams.get('dagma-s', DEFAULT_DAGMA_S)
+        self.alm_rho_mult = hyperparams.get('alm-rho-mult', 5.0)
+        self.alm_rho_max = hyperparams.get('alm-rho-max', 1e4)
+        self.alm_update_every = hyperparams.get('alm-update-every', 50)
+        self.alm_improve_ratio = hyperparams.get('alm-improve-ratio', 0.9)
+        self.register_buffer('alm_alpha', T.tensor(float(hyperparams.get('alm-alpha-init', 0.0))))
+        self.register_buffer('alm_rho', T.tensor(float(hyperparams.get('alm-rho-init', 1.0))))
+        self.register_buffer('alm_prev_h', T.tensor(float('inf')))
         self.mask_l1_lambda = hyperparams.get('mask-l1-lambda', DEFAULT_MASK_L1_LAMBDA)
         self.ordered_v = cg.v
         self.logged = False
         self.automatic_optimization = False
+        self._alm_h_sum = 0.0
+        self._alm_h_count = 0
 
     def configure_optimizers(self):
         if self.alt_opt:
@@ -150,7 +160,12 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         dag_h = 0.0
         mask_l1 = self.mask_l1_penalty()
         mask_l1_loss = self.mask_l1_lambda * mask_l1
-        if self.cycle_lambda > 0:
+        if self.dag_alm:
+            dag_h = self.notears_dag_penalty()
+            alpha = self.alm_alpha.to(device=dag_h.device, dtype=dag_h.dtype)
+            rho = self.alm_rho.to(device=dag_h.device, dtype=dag_h.dtype)
+            cycle_loss = alpha * dag_h + 0.5 * rho * dag_h.pow(2)
+        elif self.cycle_lambda > 0:
             dag_h = self.dag_penalty(
                 penalty_type=self.cycle_penalty_type,
                 dagma_s=self.dagma_s)
@@ -180,6 +195,26 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
                 return cur_loss
             query_loss += cur_loss
         return query_loss
+
+
+    def on_train_epoch_start(self):
+        self._alm_h_sum = 0.0
+        self._alm_h_count = 0
+
+    def on_train_epoch_end(self):
+        if not self.dag_alm:
+            return
+        if self._alm_h_count <= 0:
+            return
+        if (self.current_epoch + 1) % self.alm_update_every != 0:
+            return
+        mean_h = self._alm_h_sum / self._alm_h_count
+        prev_h = float(self.alm_prev_h.item())
+        if prev_h < float('inf') and mean_h > self.alm_improve_ratio * prev_h:
+            new_rho = min(float(self.alm_rho.item()) * self.alm_rho_mult, self.alm_rho_max)
+            self.alm_rho.fill_(new_rho)
+        self.alm_alpha.add_(float(self.alm_rho.item()) * mean_h)
+        self.alm_prev_h.fill_(mean_h)
 
     def training_step(self, batch, batch_idx):
         phase = self._current_phase()
@@ -212,6 +247,9 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         mmd_loss_val = mmd_loss.item()
         cycle_loss_val = cycle_loss.item() if T.is_tensor(cycle_loss) else cycle_loss
         dag_h_val = dag_h.item() if T.is_tensor(dag_h) else dag_h
+        if self.dag_alm and T.is_tensor(dag_h):
+            self._alm_h_sum += dag_h.detach().item()
+            self._alm_h_count += 1
         mask_l1_val = mask_l1.item()
         mask_l1_loss_val = mask_l1_loss.item()
         q_loss_val = q_loss.item() if T.is_tensor(q_loss) else q_loss
@@ -238,6 +276,9 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.log("mmd_loss", mmd_loss_val, prog_bar=True)
         self.log("dag_h", dag_h_val, prog_bar=True)
         self.log("cycle_loss", cycle_loss_val, prog_bar=True)
+        if self.dag_alm:
+            self.log("alm_alpha", self.alm_alpha.item(), prog_bar=False)
+            self.log("alm_rho", self.alm_rho.item(), prog_bar=False)
         self.log("mask_l1", mask_l1_val, prog_bar=True)
         self.log("mask_l1_loss", mask_l1_loss_val, prog_bar=True)
         self.log("Q_loss", q_loss_val, prog_bar=True)
