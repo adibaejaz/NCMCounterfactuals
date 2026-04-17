@@ -33,7 +33,7 @@ class MaskedNCMMinMaxRunner(BaseRunner):
         super().__init__(pipeline, dat_model, ncm_model)
 
     def create_trainer(self, directory, max_epochs, r, gpu=None):
-        checkpoint = pl.callbacks.ModelCheckpoint(dirpath=f'{directory}/{r}/checkpoints/', monitor="train_loss")
+        checkpoint = pl.callbacks.ModelCheckpoint(dirpath=f'{directory}/{r}/checkpoints/', monitor="objective_loss")
         return pl.Trainer(
             callbacks=[checkpoint],
             max_epochs=max_epochs,

@@ -134,6 +134,12 @@ parser.add_argument('--dagma-s', type=float, default=1.0,
                     help="DAGMA log-det scale parameter")
 parser.add_argument('--mask-l1-lambda', type=float, default=1.0,
                     help="weight on L1 regularization of realized mask entries; set to 0 to disable")
+parser.add_argument('--alt-opt', action="store_true",
+                    help="alternate updates between neural parameters and the mask")
+parser.add_argument('--theta-steps-per-mask', type=int, default=5,
+                    help="number of theta-only updates per mask phase in alternating optimization")
+parser.add_argument('--mask-steps-per-theta', type=int, default=1,
+                    help="number of mask-only updates per theta phase in alternating optimization")
 
 parser.add_argument('--verbose', action="store_true", help="print more information")
 
@@ -205,7 +211,11 @@ def main():
     assert graph_choice in valid_graphs or graph_choice in graph_sets
     assert bound_mode or query_track is None or query_track in valid_queries
     assert not (args.learn_mask and args.fixed_mask)
+    assert not args.alt_opt or not args.fixed_mask
     assert args.bound_outcome_value in {0, 1}
+    assert args.theta_steps_per_mask >= 0
+    assert args.mask_steps_per_theta >= 0
+    assert (args.theta_steps_per_mask + args.mask_steps_per_theta) > 0
 
     pipeline = MaskedDivergencePipeline
     dat_model = valid_generators[gen_choice]
@@ -254,6 +264,9 @@ def main():
         'cycle-penalty': args.cycle_penalty,
         'dagma-s': args.dagma_s,
         'mask-l1-lambda': args.mask_l1_lambda,
+        'alt-opt': args.alt_opt,
+        'theta-steps-per-mask': args.theta_steps_per_mask,
+        'mask-steps-per-theta': args.mask_steps_per_theta,
         'id-reruns': args.id_reruns,
         'max-query-iters': args.max_query_iters,
         'max-lambda': args.max_lambda,

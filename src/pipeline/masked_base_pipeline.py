@@ -54,6 +54,26 @@ class MaskedBasePipeline(BasePipeline):
         self.learn_mask = learn_mask
         self.use_dag_updates = use_dag_updates
 
+    def mask_parameters(self):
+        if not self.learn_mask:
+            return []
+        return [self.mask_parameter]
+
+    def theta_parameters(self):
+        return [
+            param
+            for name, param in self.named_parameters()
+            if name != "mask_parameter"
+        ]
+
+    def set_mask_requires_grad(self, flag: bool):
+        if self.learn_mask:
+            self.mask_parameter.requires_grad_(flag)
+
+    def set_theta_requires_grad(self, flag: bool):
+        for param in self.theta_parameters():
+            param.requires_grad_(flag)
+
     def _build_fixed_zero_mask(self, fixed_zero_edges=None, fixed_zero_mask=None):
         n = len(self.ncm.v)
         mask = T.ones((n, n), dtype=T.float)

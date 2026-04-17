@@ -37,13 +37,13 @@ class MaskedNCMRunner(BaseRunner):
     def create_trainer(self, directory, gpu=None):
         checkpoint = pl.callbacks.ModelCheckpoint(
             dirpath=f'{directory}/checkpoints/',
-            monitor="train_loss",
+            monitor="objective_loss",
             save_last=True,
         )
         return pl.Trainer(
             callbacks=[
                 checkpoint,
-                pl.callbacks.EarlyStopping(monitor='train_loss',
+                pl.callbacks.EarlyStopping(monitor='objective_loss',
                                            patience=self.pipeline.patience,
                                            min_delta=self.pipeline.min_delta,
                                            check_on_train_epoch_end=True)
