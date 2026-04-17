@@ -134,6 +134,8 @@ parser.add_argument('--dagma-s', type=float, default=1.0,
                     help="DAGMA log-det scale parameter")
 parser.add_argument('--mask-l1-lambda', type=float, default=1.0,
                     help="weight on L1 regularization of realized mask entries; set to 0 to disable")
+parser.add_argument('--mask-binary-lambda', type=float, default=0.0,
+                    help="weight on regularization that pushes realized mask entries away from 0.5")
 parser.add_argument('--dag-alm', action="store_true",
                     help="use a simplified augmented Lagrangian for the NOTEARS acyclicity constraint")
 parser.add_argument('--alm-alpha-init', type=float, default=0.0,
@@ -286,6 +288,7 @@ def main():
         'cycle-penalty': args.cycle_penalty,
         'dagma-s': args.dagma_s,
         'mask-l1-lambda': args.mask_l1_lambda,
+        'mask-binary-lambda': args.mask_binary_lambda,
         'dag-alm': args.dag_alm,
         'alm-alpha-init': args.alm_alpha_init,
         'alm-rho-init': args.alm_rho_init,

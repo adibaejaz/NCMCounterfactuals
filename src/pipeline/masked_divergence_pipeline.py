@@ -24,6 +24,8 @@ from .masked_base_pipeline import (
     MaskedBasePipeline,
 )
 
+DEFAULT_MASK_BINARY_LAMBDA = 0.0
+
 
 class MaskedDivergencePipeline(MaskedBasePipeline):
     patience = 50
@@ -118,6 +120,7 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.register_buffer('alm_rho', T.tensor(float(hyperparams.get('alm-rho-init', 1.0))))
         self.register_buffer('alm_prev_h', T.tensor(float('inf')))
         self.mask_l1_lambda = hyperparams.get('mask-l1-lambda', DEFAULT_MASK_L1_LAMBDA)
+        self.mask_binary_lambda = hyperparams.get('mask-binary-lambda', DEFAULT_MASK_BINARY_LAMBDA)
         self.ordered_v = cg.v
         self.logged = False
         self.automatic_optimization = False
@@ -160,6 +163,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         dag_h = 0.0
         mask_l1 = self.mask_l1_penalty()
         mask_l1_loss = self.mask_l1_lambda * mask_l1
+        mask_binary = self.mask_binary_penalty()
+        mask_binary_loss = self.mask_binary_lambda * mask_binary
         if self.dag_alm:
             dag_h = self.notears_dag_penalty()
             alpha = self.alm_alpha.to(device=dag_h.device, dtype=dag_h.dtype)
@@ -170,7 +175,7 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
                 penalty_type=self.cycle_penalty_type,
                 dagma_s=self.dagma_s)
             cycle_loss = self.cycle_lambda * dag_h
-        return cycle_loss, dag_h, mask_l1, mask_l1_loss
+        return cycle_loss, dag_h, mask_l1, mask_l1_loss, mask_binary, mask_binary_loss
 
     def _current_phase(self):
         if not self.alt_opt:
@@ -229,7 +234,7 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         active_opt.zero_grad()
         mmd_loss = self._compute_fit_loss(batch)
         max_reg = self._query_reg_weight()
-        cycle_loss, dag_h, mask_l1, mask_l1_loss = self._compute_structure_terms()
+        cycle_loss, dag_h, mask_l1, mask_l1_loss, mask_binary, mask_binary_loss = self._compute_structure_terms()
 
         q_loss = 0.0
         if self.max_query is not None:
@@ -238,7 +243,7 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
                 q_loss = max_reg * query_objective
 
         objective_loss = mmd_loss + q_loss
-        structure_loss = cycle_loss + mask_l1_loss
+        structure_loss = cycle_loss + mask_l1_loss + mask_binary_loss
         if phase == "mask":
             loss = objective_loss + structure_loss
         else:
@@ -252,6 +257,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             self._alm_h_count += 1
         mask_l1_val = mask_l1.item()
         mask_l1_loss_val = mask_l1_loss.item()
+        mask_binary_val = mask_binary.item()
+        mask_binary_loss_val = mask_binary_loss.item()
         q_loss_val = q_loss.item() if T.is_tensor(q_loss) else q_loss
         objective_loss_val = objective_loss.item()
         structure_loss_val = structure_loss.item() if T.is_tensor(structure_loss) else structure_loss
@@ -281,6 +288,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             self.log("alm_rho", self.alm_rho.item(), prog_bar=False)
         self.log("mask_l1", mask_l1_val, prog_bar=True)
         self.log("mask_l1_loss", mask_l1_loss_val, prog_bar=True)
+        self.log("mask_binary", mask_binary_val, prog_bar=True)
+        self.log("mask_binary_loss", mask_binary_loss_val, prog_bar=True)
         self.log("Q_loss", q_loss_val, prog_bar=True)
         if self.log_grad_norms:
             self.log("mask_fit_grad_norm", mask_fit_grad_norm, prog_bar=False)

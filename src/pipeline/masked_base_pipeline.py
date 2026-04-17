@@ -130,6 +130,10 @@ class MaskedBasePipeline(BasePipeline):
     def mask_l1_penalty(self):
         return self.get_mask().abs().sum()
 
+    def mask_binary_penalty(self):
+        mask = self.get_mask()
+        return (mask * (1 - mask)).sum()
+
     def get_dagma_edge_scores(self, eps=1e-8):
         edge_scores = self.get_edge_scores()
         scale = edge_scores.abs().sum()
