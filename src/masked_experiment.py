@@ -92,6 +92,8 @@ parser.add_argument("--bound-outcome-value", type=int, default=1, help="outcome 
 parser.add_argument("--bound-treatment-value", action="append", type=int, default=[],
                     help="treatment value for bound experiments; may be repeated")
 parser.add_argument("--id-reruns", type=int, default=1, help="number of min-max reruns")
+parser.add_argument("--train-seed-offset", type=int, default=0,
+                    help="offset added to min-max model initialization seeds without changing data seeds")
 parser.add_argument("--max-query-iters", type=int, default=3000, help="number of min-max training epochs")
 parser.add_argument("--max-lambda", type=float, default=1.0, help="initial query regularization weight")
 parser.add_argument("--min-lambda", type=float, default=0.001, help="final query regularization weight")
@@ -301,6 +303,7 @@ def main():
         'mask-steps-per-theta': args.mask_steps_per_theta,
         'log-grad-norms': args.log_grad_norms,
         'id-reruns': args.id_reruns,
+        'train-seed-offset': args.train_seed_offset,
         'max-query-iters': args.max_query_iters,
         'max-lambda': args.max_lambda,
         'min-lambda': args.min_lambda,

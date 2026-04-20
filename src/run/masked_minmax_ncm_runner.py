@@ -179,6 +179,7 @@ class MaskedNCMMinMaxRunner(BaseRunner):
 
                         new_key = "{}-run={}".format(key, r)
                         seed = int(hashlib.sha512(new_key.encode()).hexdigest(), 16) & 0xffffffff
+                        seed = (seed + int(hyperparams.get("train-seed-offset", 0))) & 0xffffffff
                         T.manual_seed(seed)
                         np.random.seed(seed)
                         print("Run {} seed: {}".format(r, seed))
