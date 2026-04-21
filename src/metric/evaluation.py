@@ -132,8 +132,113 @@ def event_probability(m=None, event=None, given=None, n=1000000, do=None, dat=No
     return (match.float().sum() / match_count).item()
 
 
+def _metric_event_probability(metrics, stored, key, truth, event, n, truth_kwargs, given=None):
+    if key not in metrics:
+        if stored is not None and key in stored:
+            metrics[key] = stored[key]
+        else:
+            metrics[key] = event_probability(
+                truth,
+                event=event,
+                given=given,
+                n=n,
+                model_kwargs=truth_kwargs)
+    return metrics[key]
+
+
+def _chain_query_bound_metrics(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        do_name,
+        n,
+        truth_kwargs,
+        stored):
+    marginal_key = "true_{}".format(serialize_probability(outcome_event))
+    p_y = _metric_event_probability(
+        metrics, stored, marginal_key, truth, outcome_event, n, truth_kwargs)
+
+    cond_key = "true_{}".format(serialize_probability(
+        outcome_event,
+        cond_vals={treatment_var: treatment_value}))
+    p_y_given_t = _metric_event_probability(
+        metrics, stored, cond_key, truth, outcome_event, n, truth_kwargs,
+        given={treatment_var: treatment_value})
+
+    return {
+        "marginal": p_y,
+        "conditional": p_y_given_t,
+        "lower": min(p_y, p_y_given_t),
+        "upper": max(p_y, p_y_given_t),
+    }
+
+
+def _backdoor_query_bound_metrics(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        do_name,
+        n,
+        truth_kwargs,
+        stored,
+        adjustment_var="Z"):
+    candidates = _chain_query_bound_metrics(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        do_name,
+        n,
+        truth_kwargs,
+        stored)
+
+    adjusted = 0.0
+    for adjustment_value in (0, 1):
+        adjust_key = "true_{}".format(serialize_probability({adjustment_var: adjustment_value}))
+        p_adjust = _metric_event_probability(
+            metrics,
+            stored,
+            adjust_key,
+            truth,
+            {adjustment_var: adjustment_value},
+            n,
+            truth_kwargs)
+
+        cond_key = "true_{}".format(serialize_probability(
+            outcome_event,
+            cond_vals={treatment_var: treatment_value, adjustment_var: adjustment_value}))
+        p_y_given_t_adjust = _metric_event_probability(
+            metrics,
+            stored,
+            cond_key,
+            truth,
+            outcome_event,
+            n,
+            truth_kwargs,
+            given={treatment_var: treatment_value, adjustment_var: adjustment_value})
+        adjusted += p_y_given_t_adjust * p_adjust
+
+    adjusted_key = "true_adjusted_{}".format(do_name)
+    metrics[adjusted_key] = adjusted
+
+    values = [candidates["marginal"], candidates["conditional"], adjusted]
+    return {
+        "marginal": candidates["marginal"],
+        "conditional": candidates["conditional"],
+        "adjusted": adjusted,
+        "lower": min(values),
+        "upper": max(values),
+    }
+
+
 def scm_query_bound_metrics(
         truth,
+        graph_name=None,
         outcome_var="Y",
         outcome_value=1,
         treatment_var="Z",
@@ -142,41 +247,39 @@ def scm_query_bound_metrics(
         stored=None,
         truth_kwargs=None):
     metrics = dict()
+    graph_name = graph_name.lower() if graph_name is not None else None
     outcome_event = {outcome_var: outcome_value}
-    marginal_name = serialize_probability(outcome_event)
-    marginal_key = "true_{}".format(marginal_name)
-
-    if stored is not None and marginal_key in stored:
-        p_y = stored[marginal_key]
-    else:
-        p_y = event_probability(
-            truth,
-            event=outcome_event,
-            n=n,
-            model_kwargs=truth_kwargs)
-    metrics[marginal_key] = p_y
 
     for treatment_value in treatment_values:
-        cond_name = serialize_probability(
-            outcome_event,
-            cond_vals={treatment_var: treatment_value})
-        cond_key = "true_{}".format(cond_name)
-        if stored is not None and cond_key in stored:
-            p_y_given_z = stored[cond_key]
-        else:
-            p_y_given_z = event_probability(
-                truth,
-                event=outcome_event,
-                given={treatment_var: treatment_value},
-                n=n,
-                model_kwargs=truth_kwargs)
-        metrics[cond_key] = p_y_given_z
-
         do_name = serialize_probability(
             outcome_event,
             do_vals={treatment_var: treatment_value})
-        metrics["true_lower_{}".format(do_name)] = min(p_y, p_y_given_z)
-        metrics["true_upper_{}".format(do_name)] = max(p_y, p_y_given_z)
+
+        if graph_name == "backdoor":
+            bound = _backdoor_query_bound_metrics(
+                metrics,
+                truth,
+                outcome_event,
+                treatment_var,
+                treatment_value,
+                do_name,
+                n,
+                truth_kwargs,
+                stored)
+        else:
+            bound = _chain_query_bound_metrics(
+                metrics,
+                truth,
+                outcome_event,
+                treatment_var,
+                treatment_value,
+                do_name,
+                n,
+                truth_kwargs,
+                stored)
+
+        metrics["true_lower_{}".format(do_name)] = bound["lower"]
+        metrics["true_upper_{}".format(do_name)] = bound["upper"]
 
     return metrics
 

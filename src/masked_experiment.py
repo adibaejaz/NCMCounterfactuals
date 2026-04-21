@@ -101,11 +101,15 @@ parser.add_argument("--mc-sample-size", type=int, default=10000, help="sample si
 
 parser.add_argument('--graph', '-G', default="standard", help="name of preset graph")
 parser.add_argument('--n-trials', '-t', type=int, default=1, help="number of trials")
+parser.add_argument('--trial-index', action="append", type=int, default=[],
+                    help="specific trial index to run; may be repeated. Overrides --n-trials when provided")
 parser.add_argument('--n-samples', '-n', type=int, default=10000, help="number of samples (default: 10000)")
 parser.add_argument('--dim', '-d', type=int, default=1, help="dimensionality of variables (default: 1)")
 parser.add_argument('--gpu', help="GPU to use")
 
-parser.add_argument('--mask-mode', default=DEFAULT_MASK_MODE, help="masking rule")
+parser.add_argument('--mask-mode', default=DEFAULT_MASK_MODE,
+                    choices=["threshold", "multiply", "gate", "st-gate"],
+                    help="masking rule; st-gate uses hard forward gates with sigmoid straight-through gradients")
 parser.add_argument('--mask-threshold', type=float, default=DEFAULT_MASK_THRESHOLD,
                     help="threshold for threshold/gate masking")
 parser.add_argument('--gate-sharpness', type=float, default=DEFAULT_GATE_SHARPNESS,
@@ -191,7 +195,7 @@ def _parse_fixed_zero_edges(specs):
     return edges
 
 
-def _build_bound_queries(treatment_var, treatment_value, outcome_var, outcome_value):
+def _build_bound_queries(graph_name, treatment_var, treatment_value, outcome_var, outcome_value):
     eval_query = CTF(
         {CTFTerm({outcome_var}, {treatment_var: treatment_value}, {outcome_var: outcome_value})},
         set(),
@@ -206,6 +210,7 @@ def _build_bound_queries(treatment_var, treatment_value, outcome_var, outcome_va
         ),
     )
     query_bounds = {
+        "graph_name": graph_name,
         "outcome_var": outcome_var,
         "outcome_value": outcome_value,
         "treatment_var": treatment_var,
@@ -338,11 +343,19 @@ def main():
 
     bound_values = args.bound_treatment_value if args.bound_treatment_value else [0, 1]
 
+    if args.trial_index:
+        trial_indices = args.trial_index
+        if any(i < 0 for i in trial_indices):
+            raise ValueError("--trial-index values must be nonnegative")
+    else:
+        trial_indices = range(args.n_trials)
+
     for graph in graph_set:
         do_var_list = get_experimental_variables(graph)
         if bound_mode:
             query_jobs = [
                 _build_bound_queries(
+                    graph,
                     args.bound_treatment,
                     treatment_value,
                     args.bound_outcome,
@@ -390,7 +403,7 @@ def main():
                     hyperparams["data-bs"] = n
                     hyperparams["ncm-bs"] = n
 
-                for i in range(args.n_trials):
+                for i in trial_indices:
                     cg_file = "dat/cg/{}.cg".format(graph)
                     try:
                         if not runner.run(

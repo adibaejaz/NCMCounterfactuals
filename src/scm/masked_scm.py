@@ -91,8 +91,18 @@ class GateMaskingRule(MaskingRule):
         return bool(mask_value.detach().item() > self.threshold)
 
 
+class StraightThroughGateMaskingRule(GateMaskingRule):
+    def mask_input(self, mask_value: T.Tensor, value: T.Tensor, perp_value: T.Tensor) -> T.Tensor:
+        soft_gate = T.sigmoid(
+            self.sharpness * (
+                mask_value.to(device=value.device, dtype=value.dtype) - self.threshold))
+        hard_gate = (soft_gate > 0.5).to(dtype=value.dtype)
+        gate = hard_gate.detach() - soft_gate.detach() + soft_gate
+        return gate * value + (1 - gate) * perp_value
+
+
 def get_masking_rule(
-        mask_mode: Literal["threshold", "multiply", "gate"],
+        mask_mode: Literal["threshold", "multiply", "gate", "st-gate"],
         mask_threshold: float = DEFAULT_MASK_THRESHOLD,
         gate_sharpness: float = DEFAULT_GATE_SHARPNESS) -> MaskingRule:
     if mask_mode == "threshold":
@@ -101,6 +111,8 @@ def get_masking_rule(
         return MultiplyMaskingRule()
     if mask_mode == "gate":
         return GateMaskingRule(mask_threshold, gate_sharpness)
+    if mask_mode == "st-gate":
+        return StraightThroughGateMaskingRule(mask_threshold, gate_sharpness)
     raise ValueError("unknown mask mode: {}".format(mask_mode))
 
 
@@ -131,7 +143,7 @@ class MaskedSCM(nn.Module):
             pu: Distribution,
             perp_value: MaskValue,
             v_size: Optional[Mapping[str, int]] = None,
-            mask_mode: Literal["threshold", "multiply", "gate"] = DEFAULT_MASK_MODE,
+            mask_mode: Literal["threshold", "multiply", "gate", "st-gate"] = DEFAULT_MASK_MODE,
             mask_threshold: float = DEFAULT_MASK_THRESHOLD,
             gate_sharpness: float = DEFAULT_GATE_SHARPNESS,
             max_iters: int = DEFAULT_MAX_ITERS,
