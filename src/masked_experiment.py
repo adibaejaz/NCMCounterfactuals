@@ -69,6 +69,10 @@ parser.add_argument('name', help="name of the experiment")
 parser.add_argument('--gen', default="ctm", help="data generating model (default: ctm)")
 
 parser.add_argument('--lr', type=float, default=4e-3, help="optimizer learning rate (default: 4e-3)")
+parser.add_argument('--theta-lr', type=float, default=None,
+                    help="optimizer learning rate for neural parameters; defaults to --lr")
+parser.add_argument('--mask-lr', type=float, default=None,
+                    help="optimizer learning rate for mask parameters; defaults to --lr")
 parser.add_argument('--data-bs', type=int, default=1000, help="batch size of data (default: 1000)")
 parser.add_argument('--ncm-bs', type=int, default=1000, help="batch size of NCM samples (default: 1000)")
 parser.add_argument('--h-layers', type=int, default=2, help="number of hidden layers (default: 2)")
@@ -267,6 +271,8 @@ def main():
 
     hyperparams = {
         'lr': args.lr,
+        'theta-lr': args.theta_lr if args.theta_lr is not None else args.lr,
+        'mask-lr': args.mask_lr if args.mask_lr is not None else args.lr,
         'data-bs': args.data_bs,
         'ncm-bs': args.ncm_bs,
         'h-layers': args.h_layers,

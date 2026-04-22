@@ -100,6 +100,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             self.max_query = max_query
         self.ncm_batch_size = hyperparams.get("ncm-bs", 1000)
         self.lr = hyperparams.get("lr", 0.001)
+        self.theta_lr = hyperparams.get("theta-lr", self.lr)
+        self.mask_lr = hyperparams.get("mask-lr", self.lr)
         self.max_query_iters = hyperparams.get("max-query-iters", 3000)
         self.mc_sample_size = hyperparams.get("mc-sample-size", 10000)
         self.min_lambda = hyperparams.get("min-lambda", 0.001)
@@ -129,10 +131,13 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
 
     def configure_optimizers(self):
         if self.alt_opt:
-            theta_optim = T.optim.AdamW(self.theta_parameters(), lr=self.lr)
-            mask_optim = T.optim.AdamW(self.mask_parameters(), lr=self.lr)
+            theta_optim = T.optim.AdamW(self.theta_parameters(), lr=self.theta_lr)
+            mask_optim = T.optim.AdamW(self.mask_parameters(), lr=self.mask_lr)
             return [theta_optim, mask_optim]
-        optim = T.optim.AdamW(self.parameters(), lr=self.lr)
+        optim = T.optim.AdamW([
+            {"params": self.theta_parameters(), "lr": self.theta_lr},
+            {"params": self.mask_parameters(), "lr": self.mask_lr},
+        ])
         return {
             "optimizer": optim,
             "lr_scheduler": T.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -308,7 +313,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             self.log("theta_lr", theta_opt.param_groups[0]["lr"], prog_bar=True)
             self.log("mask_lr", mask_opt.param_groups[0]["lr"], prog_bar=True)
         else:
-            self.log("lr", active_opt.param_groups[0]["lr"], prog_bar=True)
+            self.log("theta_lr", active_opt.param_groups[0]["lr"], prog_bar=True)
+            self.log("mask_lr", active_opt.param_groups[1]["lr"], prog_bar=True)
 
         if (self.current_epoch + 1) % 10 == 0:
             if not self.logged:

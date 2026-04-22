@@ -6,6 +6,13 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
+TRIAL_LABEL_Y = -0.82
+PLOT_BOTTOM = 0.42
+PLOT_RIGHT = 0.85
+X_LABEL_PAD = 132
+STANDARD_GROUP_SPACING = 1.0
+NONSTANDARD_GROUP_SPACING = 1.45
+
 
 def _find_results_files(root_dir):
     return sorted(Path(root_dir).rglob("results.json"))
@@ -86,11 +93,25 @@ def _format_float(value):
 
 
 def _group_label(group):
-    cycle_lambda, mask_mode, _trial_index = group
-    return "\n".join([
-        f"l={_format_float(cycle_lambda)}",
+    cycle_lambda, mask_mode, _trial_index, max_lambda, min_lambda = group[:5]
+    lines = [
         str(mask_mode),
-    ])
+        f"c={_format_float(cycle_lambda)}",
+    ]
+    if len(group) > 5:
+        alt_opt, dag_alm, theta_lr, mask_lr, theta_steps, mask_steps = group[5:]
+        parts = []
+        if alt_opt:
+            parts.append("alt")
+        if dag_alm:
+            parts.append("alm")
+        parts.extend([
+            f"tlr={_format_float(theta_lr)}",
+            f"mlr={_format_float(mask_lr)}",
+            f"s={theta_steps}:{mask_steps}",
+        ])
+        lines.append(" ".join(parts))
+    return "\n".join(lines)
 
 
 def _trial_sort_key(trial_index):
@@ -105,6 +126,10 @@ def _row_offsets(rows, max_span=0.62):
     return [-max_span / 2 + i * step for i in range(len(rows))]
 
 
+def _group_spacing(include_nonstandard=False):
+    return NONSTANDARD_GROUP_SPACING if include_nonstandard else STANDARD_GROUP_SPACING
+
+
 def _standard_rows(rows):
     return [
         row for row in rows
@@ -112,10 +137,102 @@ def _standard_rows(rows):
     ]
 
 
-def _group_rows(rows):
+def _matches_any(value, accepted):
+    if accepted is None:
+        return True
+    return str(value) in {str(item) for item in accepted}
+
+
+def _matches_schedule_filter(row, schedule_filter):
+    theta_steps, mask_steps, theta_lr, mask_lr = schedule_filter
+    return (
+        str(row["theta_steps_per_mask"]) == str(theta_steps)
+        and str(row["mask_steps_per_theta"]) == str(mask_steps)
+        and row["theta_lr"] == theta_lr
+        and row["mask_lr"] == mask_lr
+    )
+
+
+def _filter_rows(
+        rows,
+        include_nonstandard=False,
+        train_seed_offsets=None,
+        theta_lr=None,
+        mask_lr=None,
+        theta_steps_per_mask=None,
+        mask_steps_per_theta=None,
+        schedule_filters=None):
+    if include_nonstandard:
+        filtered = list(rows)
+    else:
+        filtered = _standard_rows(rows)
+
+    narrowed = []
+    for row in filtered:
+        if not _matches_any(row["train_seed_offset"], train_seed_offsets):
+            continue
+        if theta_lr is not None and row["theta_lr"] != theta_lr:
+            continue
+        if mask_lr is not None and row["mask_lr"] != mask_lr:
+            continue
+        if theta_steps_per_mask is not None and str(row["theta_steps_per_mask"]) != str(theta_steps_per_mask):
+            continue
+        if mask_steps_per_theta is not None and str(row["mask_steps_per_theta"]) != str(mask_steps_per_theta):
+            continue
+        if schedule_filters and not any(
+                _matches_schedule_filter(row, schedule_filter)
+                for schedule_filter in schedule_filters):
+            continue
+        narrowed.append(row)
+    return narrowed
+
+
+def _filter_label(
+        train_seed_offsets=None,
+        theta_lr=None,
+        mask_lr=None,
+        theta_steps_per_mask=None,
+        mask_steps_per_theta=None,
+        schedule_filters=None):
+    filters = []
+    if train_seed_offsets:
+        filters.append(f"seed={','.join(str(offset) for offset in train_seed_offsets)}")
+    if theta_lr is not None:
+        filters.append(f"theta_lr={theta_lr:g}")
+    if mask_lr is not None:
+        filters.append(f"mask_lr={mask_lr:g}")
+    if theta_steps_per_mask is not None or mask_steps_per_theta is not None:
+        filters.append(f"steps={theta_steps_per_mask or '?'}:{mask_steps_per_theta or '?'}")
+    if schedule_filters:
+        labels = [
+            f"{theta_steps}:{mask_steps} tlr={theta_lr:g} mlr={mask_lr:g}"
+            for theta_steps, mask_steps, theta_lr, mask_lr in schedule_filters
+        ]
+        filters.append("schedule=" + " | ".join(labels))
+    if not filters:
+        return ""
+    return " (" + ", ".join(filters) + ")"
+
+
+def _group_rows(rows, include_nonstandard=False):
     grouped = {}
     for row in rows:
-        group = (row["cycle_lambda"], row["mask_mode"], row["trial_index"])
+        group = (
+            row["cycle_lambda"],
+            row["mask_mode"],
+            row["trial_index"],
+            row["max_lambda"],
+            row["min_lambda"],
+        )
+        if include_nonstandard:
+            group = group + (
+                row["alt_opt"],
+                row["dag_alm"],
+                row["theta_lr"],
+                row["mask_lr"],
+                row["theta_steps_per_mask"],
+                row["mask_steps_per_theta"],
+            )
         grouped.setdefault(group, []).append(row)
     return grouped
 
@@ -127,6 +244,9 @@ def _sort_groups(groups):
             _trial_sort_key(group[2]),
             str(group[1]),
             float("inf") if group[0] is None else group[0],
+            float("inf") if group[3] is None else group[3],
+            float("inf") if group[4] is None else group[4],
+            tuple(group[5:]),
         ),
     )
 
@@ -162,7 +282,7 @@ def _add_trial_labels(ax, trial_groups):
         center = (min(trial_xs) + max(trial_xs)) / 2
         ax.text(
             center,
-            -0.55,
+            TRIAL_LABEL_Y,
             f"trial {trial_index}",
             ha="center",
             va="top",
@@ -256,11 +376,17 @@ def load_bound_results(root_dir):
             "run_id": _extract_run_id(run_dir),
             "trial_index": _extract_trial_index(run_dir),
             "cycle_lambda": _as_float(hyperparams.get("cycle-lambda")),
+            "max_lambda": _as_float(hyperparams.get("max-lambda")),
+            "min_lambda": _as_float(hyperparams.get("min-lambda")),
             "mask_mode": hyperparams.get("mask-mode", "?"),
             "train_seed_offset": hyperparams.get("train-seed-offset", "0"),
             "cycle_penalty": hyperparams.get("cycle-penalty"),
             "alt_opt": _as_bool(hyperparams.get("alt-opt")),
             "dag_alm": _as_bool(hyperparams.get("dag-alm")),
+            "theta_lr": _as_float(hyperparams.get("theta-lr")),
+            "mask_lr": _as_float(hyperparams.get("mask-lr")),
+            "theta_steps_per_mask": hyperparams.get("theta-steps-per-mask", "?"),
+            "mask_steps_per_theta": hyperparams.get("mask-steps-per-theta", "?"),
             "standard_bound_run": _standard_bound_run(hyperparams),
             "results_path": str(results_path),
             **series,
@@ -272,16 +398,38 @@ def load_bound_results(root_dir):
     return rows
 
 
-def plot_bound_results(root_dir, output_path=None, title=None, figsize=None):
-    rows = _standard_rows(load_bound_results(root_dir))
+def plot_bound_results(
+        root_dir,
+        output_path=None,
+        title=None,
+        figsize=None,
+        include_nonstandard=False,
+        train_seed_offsets=None,
+        theta_lr=None,
+        mask_lr=None,
+        theta_steps_per_mask=None,
+        mask_steps_per_theta=None,
+        schedule_filters=None):
+    rows = _filter_rows(
+        load_bound_results(root_dir),
+        include_nonstandard=include_nonstandard,
+        train_seed_offsets=train_seed_offsets,
+        theta_lr=theta_lr,
+        mask_lr=mask_lr,
+        theta_steps_per_mask=theta_steps_per_mask,
+        mask_steps_per_theta=mask_steps_per_theta,
+        schedule_filters=schedule_filters,
+    )
     if not rows:
         raise ValueError(f"No completed bound results found under {root_dir}")
 
-    grouped = _group_rows(rows)
+    grouped = _group_rows(rows, include_nonstandard=include_nonstandard)
     groups = _sort_groups(grouped)
     n_runs = len(groups)
     if figsize is None:
-        figsize = (max(12, 0.75 * n_runs), 6)
+        width_per_run = 1.05 if include_nonstandard else 0.75
+        height = 8 if include_nonstandard else 6
+        figsize = (max(12, width_per_run * n_runs), height)
 
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -289,11 +437,13 @@ def plot_bound_results(root_dir, output_path=None, title=None, figsize=None):
     ncm_min_color = "#d62728"
     ncm_max_color = "#ff7f0e"
     half_width = 0.28
-    xs = list(range(n_runs))
+    spacing = _group_spacing(include_nonstandard=include_nonstandard)
+    xs = [i * spacing for i in range(n_runs)]
 
     for x in xs:
-        if x % 2 == 0:
-            ax.axvspan(x - 0.5, x + 0.5, color="0.96", zorder=0)
+        group_index = round(x / spacing)
+        if group_index % 2 == 0:
+            ax.axvspan(x - spacing / 2, x + spacing / 2, color="0.96", zorder=0)
 
     trial_groups = _add_trial_tiers(ax, xs, groups)
 
@@ -335,12 +485,20 @@ def plot_bound_results(root_dir, output_path=None, title=None, figsize=None):
                 zorder=4,
             )
 
-    ax.set_xlim(-0.8, n_runs - 0.2)
+    ax.set_xlim(-0.8 * spacing, xs[-1] + 0.8 * spacing)
     ax.set_xticks(xs)
     ax.set_xticklabels([_group_label(group) for group in groups], rotation=45, ha="right", fontsize=8)
-    ax.set_xlabel("Cycle lambda / mask mode, grouped by trial", labelpad=72)
+    ax.set_xlabel("Cycle lambda / mask mode, grouped by trial", labelpad=X_LABEL_PAD)
     ax.set_ylabel("Query value")
-    ax.set_title(title or f"True Bounds and NCM Seed Results ({Path(root_dir)})")
+    filter_label = _filter_label(
+        train_seed_offsets=train_seed_offsets,
+        theta_lr=theta_lr,
+        mask_lr=mask_lr,
+        theta_steps_per_mask=theta_steps_per_mask,
+        mask_steps_per_theta=mask_steps_per_theta,
+        schedule_filters=schedule_filters,
+    )
+    ax.set_title(title or f"True Bounds and NCM Seed Results ({Path(root_dir)}){filter_label}")
     ax.grid(axis="y", alpha=0.3, zorder=1)
 
     _add_trial_labels(ax, trial_groups)
@@ -358,7 +516,7 @@ def plot_bound_results(root_dir, output_path=None, title=None, figsize=None):
         borderaxespad=0.0,
     )
 
-    fig.tight_layout(rect=(0, 0.22, 0.85, 1))
+    fig.subplots_adjust(bottom=PLOT_BOTTOM, right=PLOT_RIGHT)
 
     if output_path is not None:
         fig.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -366,9 +524,29 @@ def plot_bound_results(root_dir, output_path=None, title=None, figsize=None):
     return fig, ax
 
 
-def plot_kl_results(root_dir, output_path=None, title=None, figsize=None):
+def plot_kl_results(
+        root_dir,
+        output_path=None,
+        title=None,
+        figsize=None,
+        include_nonstandard=False,
+        train_seed_offsets=None,
+        theta_lr=None,
+        mask_lr=None,
+        theta_steps_per_mask=None,
+        mask_steps_per_theta=None,
+        schedule_filters=None):
     rows = [
-        row for row in _standard_rows(load_bound_results(root_dir))
+        row for row in _filter_rows(
+            load_bound_results(root_dir),
+            include_nonstandard=include_nonstandard,
+            train_seed_offsets=train_seed_offsets,
+            theta_lr=theta_lr,
+            mask_lr=mask_lr,
+            theta_steps_per_mask=theta_steps_per_mask,
+            mask_steps_per_theta=mask_steps_per_theta,
+            schedule_filters=schedule_filters,
+        )
         if all(
             key in row
             for key in (
@@ -382,17 +560,20 @@ def plot_kl_results(root_dir, output_path=None, title=None, figsize=None):
     if not rows:
         raise ValueError(f"No completed bound KL results found under {root_dir}")
 
-    grouped = _group_rows(rows)
+    grouped = _group_rows(rows, include_nonstandard=include_nonstandard)
     groups = _sort_groups(grouped)
     n_runs = len(groups)
     if figsize is None:
-        figsize = (max(12, 0.75 * n_runs), 10)
+        width_per_run = 1.05 if include_nonstandard else 0.75
+        height = 13 if include_nonstandard else 10
+        figsize = (max(12, width_per_run * n_runs), height)
 
     fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
 
     min_color = "#d62728"
     max_color = "#ff7f0e"
-    xs = list(range(n_runs))
+    spacing = _group_spacing(include_nonstandard=include_nonstandard)
+    xs = [i * spacing for i in range(n_runs)]
 
     metric_specs = [
         (axes[0], "min_total_true_KL", "max_total_true_KL", "True KL"),
@@ -401,8 +582,9 @@ def plot_kl_results(root_dir, output_path=None, title=None, figsize=None):
 
     for ax, min_key, max_key, ylabel in metric_specs:
         for x in xs:
-            if x % 2 == 0:
-                ax.axvspan(x - 0.5, x + 0.5, color="0.96", zorder=0)
+            group_index = round(x / spacing)
+            if group_index % 2 == 0:
+                ax.axvspan(x - spacing / 2, x + spacing / 2, color="0.96", zorder=0)
 
         trial_groups = _add_trial_tiers(ax, xs, groups)
 
@@ -440,14 +622,22 @@ def plot_kl_results(root_dir, output_path=None, title=None, figsize=None):
         if values and all(value > 0 for value in values):
             ax.set_yscale("log")
 
-        ax.set_xlim(-0.8, n_runs - 0.2)
+        ax.set_xlim(-0.8 * spacing, xs[-1] + 0.8 * spacing)
         ax.set_ylabel(ylabel)
         ax.grid(axis="y", alpha=0.3, zorder=1)
 
-    axes[0].set_title(title or f"Min/Max NCM KL Divergence ({Path(root_dir)})")
+    filter_label = _filter_label(
+        train_seed_offsets=train_seed_offsets,
+        theta_lr=theta_lr,
+        mask_lr=mask_lr,
+        theta_steps_per_mask=theta_steps_per_mask,
+        mask_steps_per_theta=mask_steps_per_theta,
+        schedule_filters=schedule_filters,
+    )
+    axes[0].set_title(title or f"Min/Max NCM KL Divergence ({Path(root_dir)}){filter_label}")
     axes[1].set_xticks(xs)
     axes[1].set_xticklabels([_group_label(group) for group in groups], rotation=45, ha="right", fontsize=8)
-    axes[1].set_xlabel("Cycle lambda / mask mode, grouped by trial", labelpad=72)
+    axes[1].set_xlabel("Cycle lambda / mask mode, grouped by trial", labelpad=X_LABEL_PAD)
     _add_trial_labels(axes[1], trial_groups)
 
     axes[0].legend(
@@ -462,7 +652,7 @@ def plot_kl_results(root_dir, output_path=None, title=None, figsize=None):
         borderaxespad=0.0,
     )
 
-    fig.tight_layout(rect=(0, 0.22, 0.85, 1))
+    fig.subplots_adjust(bottom=PLOT_BOTTOM, right=PLOT_RIGHT, hspace=0.12)
 
     if output_path is not None:
         fig.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -491,9 +681,42 @@ def _fmt(value):
     return f"{value:.5g}"
 
 
-def _print_summary_table(root_dir):
+def _parse_schedule_filter(value):
+    pieces = value.replace(",", ":").split(":")
+    if len(pieces) != 4:
+        raise argparse.ArgumentTypeError(
+            "expected THETA_STEPS:MASK_STEPS:THETA_LR:MASK_LR, "
+            "for example 5:1:4e-3:4e-3"
+        )
+    theta_steps, mask_steps, theta_lr, mask_lr = pieces
+    try:
+        return theta_steps, mask_steps, float(theta_lr), float(mask_lr)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "theta/mask learning rates in schedule filters must be numeric"
+        ) from exc
+
+
+def _print_summary_table(
+        root_dir,
+        include_nonstandard=False,
+        train_seed_offsets=None,
+        theta_lr=None,
+        mask_lr=None,
+        theta_steps_per_mask=None,
+        mask_steps_per_theta=None,
+        schedule_filters=None):
     rows = [
-        row for row in _standard_rows(load_bound_results(root_dir))
+        row for row in _filter_rows(
+            load_bound_results(root_dir),
+            include_nonstandard=include_nonstandard,
+            train_seed_offsets=train_seed_offsets,
+            theta_lr=theta_lr,
+            mask_lr=mask_lr,
+            theta_steps_per_mask=theta_steps_per_mask,
+            mask_steps_per_theta=mask_steps_per_theta,
+            schedule_filters=schedule_filters,
+        )
         if all(
             key in row
             for key in (
@@ -506,15 +729,24 @@ def _print_summary_table(root_dir):
         )
     ]
     if not rows:
-        print("No standard rows available for summary table.")
+        row_kind = "rows" if include_nonstandard else "standard rows"
+        print(f"No {row_kind} available for summary table.")
         return
 
-    grouped = _group_rows(rows)
+    grouped = _group_rows(rows, include_nonstandard=include_nonstandard)
     groups = _sort_groups(grouped)
     headers = [
         "trial",
         "mask",
-        "lambda",
+        "cycle_lambda",
+        "max_lambda",
+        "min_lambda",
+        "alt_opt",
+        "dag_alm",
+        "theta_lr",
+        "mask_lr",
+        "theta_steps",
+        "mask_steps",
         "n",
         "true_KL_mean",
         "true_KL_std",
@@ -525,11 +757,16 @@ def _print_summary_table(root_dir):
         "max_bound_err",
     ]
     print()
-    print("Summary table (standard runs only)")
+    table_label = "all runs" if include_nonstandard else "standard runs only"
+    print(f"Summary table ({table_label})")
     print("\t".join(headers))
     for group in groups:
         group_rows = grouped[group]
-        cycle_lambda, mask_mode, trial_index = group
+        cycle_lambda, mask_mode, trial_index, max_lambda, min_lambda = group[:5]
+        if len(group) > 5:
+            alt_opt, dag_alm, theta_lr, mask_lr, theta_steps, mask_steps = group[5:]
+        else:
+            alt_opt, dag_alm, theta_lr, mask_lr, theta_steps, mask_steps = ("", "", None, None, "", "")
         true_kl = [
             (row["min_total_true_KL"] + row["max_total_true_KL"]) / 2
             for row in group_rows
@@ -544,6 +781,14 @@ def _print_summary_table(root_dir):
             str(trial_index),
             str(mask_mode),
             _format_float(cycle_lambda),
+            _format_float(max_lambda),
+            _format_float(min_lambda),
+            str(alt_opt),
+            str(dag_alm),
+            _format_float(theta_lr),
+            _format_float(mask_lr),
+            str(theta_steps),
+            str(mask_steps),
             str(len(group_rows)),
             _fmt(_mean(true_kl)),
             _fmt(_std(true_kl)),
@@ -555,9 +800,26 @@ def _print_summary_table(root_dir):
         ]))
 
 
-def _summary_metric_rows(root_dir):
+def _summary_metric_rows(
+        root_dir,
+        include_nonstandard=False,
+        train_seed_offsets=None,
+        theta_lr=None,
+        mask_lr=None,
+        theta_steps_per_mask=None,
+        mask_steps_per_theta=None,
+        schedule_filters=None):
     rows = [
-        row for row in _standard_rows(load_bound_results(root_dir))
+        row for row in _filter_rows(
+            load_bound_results(root_dir),
+            include_nonstandard=include_nonstandard,
+            train_seed_offsets=train_seed_offsets,
+            theta_lr=theta_lr,
+            mask_lr=mask_lr,
+            theta_steps_per_mask=theta_steps_per_mask,
+            mask_steps_per_theta=mask_steps_per_theta,
+            schedule_filters=schedule_filters,
+        )
         if all(
             key in row
             for key in (
@@ -570,19 +832,56 @@ def _summary_metric_rows(root_dir):
     ]
     metric_rows = []
     for row in rows:
+        group = (
+            row["mask_mode"],
+            row["cycle_lambda"],
+            row["max_lambda"],
+            row["min_lambda"],
+        )
+        if include_nonstandard:
+            group = group + (
+                row["alt_opt"],
+                row["dag_alm"],
+                row["theta_lr"],
+                row["mask_lr"],
+                row["theta_steps_per_mask"],
+                row["mask_steps_per_theta"],
+            )
         metric_rows.append({
-            "group": (row["mask_mode"], row["cycle_lambda"]),
-            "kl": (row["min_total_true_KL"] + row["max_total_true_KL"]) / 2,
+            "group": group,
+            "min_kl": row["min_total_true_KL"],
+            "max_kl": row["max_total_true_KL"],
             "min_bound_error": abs(row["err_lower"]),
             "max_bound_error": abs(row["err_upper"]),
         })
     return metric_rows
 
 
-def plot_summary_stats(root_dir, output_path=None, title=None, figsize=None):
-    metric_rows = _summary_metric_rows(root_dir)
+def plot_summary_stats(
+        root_dir,
+        output_path=None,
+        title=None,
+        figsize=None,
+        include_nonstandard=False,
+        train_seed_offsets=None,
+        theta_lr=None,
+        mask_lr=None,
+        theta_steps_per_mask=None,
+        mask_steps_per_theta=None,
+        schedule_filters=None):
+    metric_rows = _summary_metric_rows(
+        root_dir,
+        include_nonstandard=include_nonstandard,
+        train_seed_offsets=train_seed_offsets,
+        theta_lr=theta_lr,
+        mask_lr=mask_lr,
+        theta_steps_per_mask=theta_steps_per_mask,
+        mask_steps_per_theta=mask_steps_per_theta,
+        schedule_filters=schedule_filters,
+    )
     if not metric_rows:
-        raise ValueError(f"No completed standard rows found for summary stats under {root_dir}")
+        row_kind = "rows" if include_nonstandard else "standard rows"
+        raise ValueError(f"No completed {row_kind} found for summary stats under {root_dir}")
 
     grouped = {}
     for row in metric_rows:
@@ -595,16 +894,34 @@ def plot_summary_stats(root_dir, output_path=None, title=None, figsize=None):
             float("inf") if group[1] is None else group[1],
         ),
     )
-    labels = [
-        f"{mask}\nlambda={_format_float(cycle_lambda)}"
-        for mask, cycle_lambda in groups
-    ]
+    labels = []
+    for group in groups:
+        mask, cycle_lambda, max_lambda, min_lambda = group[:4]
+        lines = [
+            str(mask),
+            f"c={_format_float(cycle_lambda)}",
+        ]
+        if len(group) > 4:
+            alt_opt, dag_alm, theta_lr, mask_lr, theta_steps, mask_steps = group[4:]
+            parts = []
+            if alt_opt:
+                parts.append("alt")
+            if dag_alm:
+                parts.append("alm")
+            parts.extend([
+                f"tlr={_format_float(theta_lr)}",
+                f"mlr={_format_float(mask_lr)}",
+                f"s={theta_steps}:{mask_steps}",
+            ])
+            lines.append(" ".join(parts))
+        labels.append("\n".join(lines))
     metrics = [
-        ("kl", "KL"),
+        ("min_kl", "Min KL"),
+        ("max_kl", "Max KL"),
         ("min_bound_error", "Min Bound Error"),
         ("max_bound_error", "Max Bound Error"),
     ]
-    colors = ["#4c78a8", "#d62728", "#ff7f0e"]
+    colors = ["#4c78a8", "#72b7b2", "#d62728", "#ff7f0e"]
 
     if figsize is None:
         figsize = (max(12, 0.8 * len(groups)), 10)
@@ -618,12 +935,20 @@ def plot_summary_stats(root_dir, output_path=None, title=None, figsize=None):
         ax.bar(xs, means, yerr=stds, color=color, alpha=0.82, capsize=4, ecolor="black")
         ax.set_ylabel(ylabel)
         ax.grid(axis="y", alpha=0.3)
-        if metric_key == "kl" and all(value > 0 for value in means):
+        if metric_key in {"min_kl", "max_kl"} and all(value > 0 for value in means):
             ax.set_yscale("log")
 
     axes[-1].set_xticks(xs)
     axes[-1].set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
-    axes[0].set_title(title or f"Aggregate KL and Bound Errors ({Path(root_dir)})")
+    filter_label = _filter_label(
+        train_seed_offsets=train_seed_offsets,
+        theta_lr=theta_lr,
+        mask_lr=mask_lr,
+        theta_steps_per_mask=theta_steps_per_mask,
+        mask_steps_per_theta=mask_steps_per_theta,
+        schedule_filters=schedule_filters,
+    )
+    axes[0].set_title(title or f"Aggregate KL and Bound Errors ({Path(root_dir)}){filter_label}")
     fig.tight_layout(rect=(0, 0, 1, 0.97))
 
     if output_path is not None:
@@ -637,20 +962,88 @@ def main():
     parser.add_argument("root_dir", help="Root directory to search recursively for results.json files")
     parser.add_argument("--output", help="Defaults to <root_dir>/bound_results.png")
     parser.add_argument("--title", help="Optional plot title")
+    parser.add_argument("--kl-output", help="Defaults to <root_dir>/bound_kl_results.png")
     parser.add_argument("--kl-title", help="Optional KL plot title")
     parser.add_argument("--summary-output", help="Defaults to <root_dir>/bound_summary_stats.png")
     parser.add_argument("--summary-title", help="Optional aggregate summary plot title")
     parser.add_argument("--no-table", action="store_true", help="Do not print grouped KL/bound-error summary table")
+    parser.add_argument(
+        "--include-nonstandard",
+        action="store_true",
+        help="Include runs normally skipped as nonstandard, such as alt-opt or dag-alm runs",
+    )
+    parser.add_argument(
+        "--train-seed-offset",
+        action="append",
+        dest="train_seed_offsets",
+        help="Filter by train seed offset. May be repeated.",
+    )
+    parser.add_argument("--theta-lr", type=float, help="Filter by theta learning rate")
+    parser.add_argument("--mask-lr", type=float, help="Filter by mask learning rate")
+    parser.add_argument("--theta-steps-per-mask", help="Filter by theta steps per mask update")
+    parser.add_argument("--mask-steps-per-theta", help="Filter by mask steps per theta update")
+    parser.add_argument(
+        "--schedule-filter",
+        action="append",
+        type=_parse_schedule_filter,
+        dest="schedule_filters",
+        help=(
+            "Filter by one theta/mask schedule as THETA_STEPS:MASK_STEPS:THETA_LR:MASK_LR. "
+            "May be repeated to keep multiple schedules."
+        ),
+    )
     args = parser.parse_args()
 
     output = args.output or str(Path(args.root_dir) / "bound_results.png")
-    kl_output = str(Path(args.root_dir) / "bound_kl_results.png")
+    kl_output = args.kl_output or str(Path(args.root_dir) / "bound_kl_results.png")
     summary_output = args.summary_output or str(Path(args.root_dir) / "bound_summary_stats.png")
-    plot_bound_results(args.root_dir, output_path=output, title=args.title)
-    plot_kl_results(args.root_dir, output_path=kl_output, title=args.kl_title)
-    plot_summary_stats(args.root_dir, output_path=summary_output, title=args.summary_title)
+    plot_bound_results(
+        args.root_dir,
+        output_path=output,
+        title=args.title,
+        include_nonstandard=args.include_nonstandard,
+        train_seed_offsets=args.train_seed_offsets,
+        theta_lr=args.theta_lr,
+        mask_lr=args.mask_lr,
+        theta_steps_per_mask=args.theta_steps_per_mask,
+        mask_steps_per_theta=args.mask_steps_per_theta,
+        schedule_filters=args.schedule_filters,
+    )
+    plot_kl_results(
+        args.root_dir,
+        output_path=kl_output,
+        title=args.kl_title,
+        include_nonstandard=args.include_nonstandard,
+        train_seed_offsets=args.train_seed_offsets,
+        theta_lr=args.theta_lr,
+        mask_lr=args.mask_lr,
+        theta_steps_per_mask=args.theta_steps_per_mask,
+        mask_steps_per_theta=args.mask_steps_per_theta,
+        schedule_filters=args.schedule_filters,
+    )
+    plot_summary_stats(
+        args.root_dir,
+        output_path=summary_output,
+        title=args.summary_title,
+        include_nonstandard=args.include_nonstandard,
+        train_seed_offsets=args.train_seed_offsets,
+        theta_lr=args.theta_lr,
+        mask_lr=args.mask_lr,
+        theta_steps_per_mask=args.theta_steps_per_mask,
+        mask_steps_per_theta=args.mask_steps_per_theta,
+        schedule_filters=args.schedule_filters,
+    )
     if not args.no_table:
-        _print_summary_table(args.root_dir)
+        _print_summary_table(
+            args.root_dir,
+            include_nonstandard=args.include_nonstandard,
+            train_seed_offsets=args.train_seed_offsets,
+            theta_lr=args.theta_lr,
+            mask_lr=args.mask_lr,
+            theta_steps_per_mask=args.theta_steps_per_mask,
+            mask_steps_per_theta=args.mask_steps_per_theta,
+            schedule_filters=args.schedule_filters,
+        )
     print(f"Saved plot to {output}")
     print(f"Saved KL plot to {kl_output}")
     print(f"Saved summary stats plot to {summary_output}")
