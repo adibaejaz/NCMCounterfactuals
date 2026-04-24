@@ -102,6 +102,10 @@ parser.add_argument("--max-query-iters", type=int, default=3000, help="number of
 parser.add_argument("--max-lambda", type=float, default=1.0, help="initial query regularization weight")
 parser.add_argument("--min-lambda", type=float, default=0.001, help="final query regularization weight")
 parser.add_argument("--mc-sample-size", type=int, default=10000, help="sample size for query optimization")
+parser.add_argument("--theta-only-extra-epochs", type=int, default=0,
+                    help="after min-max training, freeze learned masks and train theta only for this many extra epochs")
+parser.add_argument("--theta-only-extra-lr", type=float, default=None,
+                    help="theta learning rate for --theta-only-extra-epochs; defaults to --theta-lr/--lr")
 
 parser.add_argument('--graph', '-G', default="standard", help="name of preset graph")
 parser.add_argument('--n-trials', '-t', type=int, default=1, help="number of trials")
@@ -245,6 +249,8 @@ def main():
     assert args.theta_steps_per_mask >= 0
     assert args.mask_steps_per_theta >= 0
     assert (args.theta_steps_per_mask + args.mask_steps_per_theta) > 0
+    assert args.theta_only_extra_epochs >= 0
+    assert args.theta_only_extra_lr is None or args.theta_only_extra_lr > 0
     assert args.alm_rho_init > 0
     assert args.alm_rho_mult >= 1.0
     assert args.alm_rho_max >= args.alm_rho_init
@@ -320,6 +326,11 @@ def main():
         'min-lambda': args.min_lambda,
         'mc-sample-size': args.mc_sample_size,
     }
+    if args.theta_only_extra_epochs > 0:
+        hyperparams['theta-only-extra-epochs'] = args.theta_only_extra_epochs
+        hyperparams['theta-only-final-query-reg'] = True
+        if args.theta_only_extra_lr is not None:
+            hyperparams['theta-only-extra-lr'] = args.theta_only_extra_lr
 
     if graph_choice in graph_sets:
         if bound_mode:

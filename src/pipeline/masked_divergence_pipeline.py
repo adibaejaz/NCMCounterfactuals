@@ -123,6 +123,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.register_buffer('alm_prev_h', T.tensor(float('inf')))
         self.mask_l1_lambda = hyperparams.get('mask-l1-lambda', DEFAULT_MASK_L1_LAMBDA)
         self.mask_binary_lambda = hyperparams.get('mask-binary-lambda', DEFAULT_MASK_BINARY_LAMBDA)
+        self.theta_only_phase = hyperparams.get('theta-only-phase', False)
+        self.final_query_reg = hyperparams.get('final-query-reg', False)
         self.ordered_v = cg.v
         self.logged = False
         self.automatic_optimization = False
@@ -130,6 +132,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self._alm_h_count = 0
 
     def configure_optimizers(self):
+        if self.theta_only_phase:
+            return T.optim.AdamW(self.theta_parameters(), lr=self.theta_lr)
         if self.alt_opt:
             theta_optim = T.optim.AdamW(self.theta_parameters(), lr=self.theta_lr)
             mask_optim = T.optim.AdamW(self.mask_parameters(), lr=self.mask_lr)
@@ -158,10 +162,20 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         return fit_loss
 
     def _query_reg_weight(self):
+        if self.final_query_reg:
+            return self.min_lambda
         reg_ratio = min(self.current_epoch, self.max_query_iters) / self.max_query_iters
         reg_up = np.log(self.max_lambda)
         reg_low = np.log(self.min_lambda)
         return np.exp(reg_up - reg_ratio * (reg_up - reg_low))
+
+    def start_theta_only_phase(self, theta_lr=None, final_query_reg=True):
+        if theta_lr is not None:
+            self.theta_lr = theta_lr
+        self.theta_only_phase = True
+        self.final_query_reg = final_query_reg
+        self.set_theta_requires_grad(True)
+        self.set_mask_requires_grad(False)
 
     def _compute_structure_terms(self):
         cycle_loss = 0.0
@@ -183,6 +197,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         return cycle_loss, dag_h, mask_l1, mask_l1_loss, mask_binary, mask_binary_loss
 
     def _current_phase(self):
+        if self.theta_only_phase:
+            return "theta"
         if not self.alt_opt:
             return "joint"
         cycle_len = self.theta_steps_per_mask + self.mask_steps_per_theta
@@ -228,7 +244,11 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
 
     def training_step(self, batch, batch_idx):
         phase = self._current_phase()
-        if self.alt_opt:
+        if self.theta_only_phase:
+            active_opt = self.optimizers()
+            self.set_theta_requires_grad(True)
+            self.set_mask_requires_grad(False)
+        elif self.alt_opt:
             theta_opt, mask_opt = self.optimizers()
             active_opt = theta_opt if phase == "theta" else mask_opt
             self.set_theta_requires_grad(phase == "theta")
@@ -278,7 +298,10 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.manual_backward(loss)
         active_opt.step()
 
-        if self.alt_opt:
+        if self.theta_only_phase:
+            self.set_theta_requires_grad(True)
+            self.set_mask_requires_grad(False)
+        elif self.alt_opt:
             self.set_theta_requires_grad(True)
             self.set_mask_requires_grad(True)
 
@@ -309,7 +332,10 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             self.log("train_loss_mask", loss_val, prog_bar=False)
         else:
             self.log("train_loss_theta", loss_val, prog_bar=False)
-        if self.alt_opt:
+        if self.theta_only_phase:
+            self.log("theta_lr", active_opt.param_groups[0]["lr"], prog_bar=True)
+            self.log("mask_lr", 0.0, prog_bar=True)
+        elif self.alt_opt:
             self.log("theta_lr", theta_opt.param_groups[0]["lr"], prog_bar=True)
             self.log("mask_lr", mask_opt.param_groups[0]["lr"], prog_bar=True)
         else:

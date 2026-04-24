@@ -32,8 +32,11 @@ class MaskedNCMMinMaxRunner(BaseRunner):
     def __init__(self, pipeline, dat_model, ncm_model):
         super().__init__(pipeline, dat_model, ncm_model)
 
-    def create_trainer(self, directory, max_epochs, r, gpu=None):
-        checkpoint = pl.callbacks.ModelCheckpoint(dirpath=f'{directory}/{r}/checkpoints/', monitor="objective_loss")
+    def create_trainer(self, directory, max_epochs, r, gpu=None, phase=None):
+        checkpoint_dir = f'{directory}/{r}/checkpoints/'
+        if phase is not None:
+            checkpoint_dir = f'{directory}/{r}/checkpoints_{phase}/'
+        checkpoint = pl.callbacks.ModelCheckpoint(dirpath=checkpoint_dir, monitor="objective_loss")
         return pl.Trainer(
             callbacks=[checkpoint],
             max_epochs=max_epochs,
@@ -215,6 +218,32 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                         trainer_min.fit(m_min)
                         ckpt_min = T.load(checkpoint_min.best_model_path)
                         m_min.load_state_dict(ckpt_min['state_dict'])
+
+                        theta_only_extra_epochs = int(hyperparams.get('theta-only-extra-epochs', 0))
+                        if theta_only_extra_epochs > 0:
+                            theta_only_extra_lr = hyperparams.get('theta-only-extra-lr', None)
+
+                            print("\nTraining max model theta-only extension...")
+                            m_max.start_theta_only_phase(
+                                theta_lr=theta_only_extra_lr,
+                                final_query_reg=hyperparams.get('theta-only-final-query-reg', True))
+                            trainer_max_extra, checkpoint_max_extra = self.create_trainer(
+                                d, theta_only_extra_epochs, r, gpu, phase='theta_only_max')
+                            trainer_max_extra.fit(m_max)
+                            if checkpoint_max_extra.best_model_path:
+                                ckpt_max = T.load(checkpoint_max_extra.best_model_path)
+                                m_max.load_state_dict(ckpt_max['state_dict'])
+
+                            print("\nTraining min model theta-only extension...")
+                            m_min.start_theta_only_phase(
+                                theta_lr=theta_only_extra_lr,
+                                final_query_reg=hyperparams.get('theta-only-final-query-reg', True))
+                            trainer_min_extra, checkpoint_min_extra = self.create_trainer(
+                                d, theta_only_extra_epochs, r, gpu, phase='theta_only_min')
+                            trainer_min_extra.fit(m_min)
+                            if checkpoint_min_extra.best_model_path:
+                                ckpt_min = T.load(checkpoint_min_extra.best_model_path)
+                                m_min.load_state_dict(ckpt_min['state_dict'])
 
                         results = evaluation.all_metrics_minmax(
                             m_max.generator, m_min.ncm, m_max.ncm, hyperparams["do-var-list"], dat_sets,
