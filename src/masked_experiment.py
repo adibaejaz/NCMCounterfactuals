@@ -44,7 +44,7 @@ valid_generators = {
 
 valid_graphs = {
     "backdoor", "bow", "frontdoor", "napkin", "simple", "chain", "bdm", "med", "expl", "double_bow", "iv", "bad_fd",
-    "extended_bow", "bad_m", "m",
+    "extended_bow", "bad_m", "m", "square", "four_clique",
     "zid_a", "zid_b", "zid_c",
     "gid_a", "gid_b", "gid_c", "gid_d",
     "med_c1", "med_c2",
@@ -89,8 +89,8 @@ parser.add_argument('--gen-bs', type=int, default=10000, help="batch size of ctm
 parser.add_argument('--no-positivity', action="store_true", help="does not enforce positivity for ID experiments")
 
 parser.add_argument("--query-track", default="ate", help="choice of query to track")
-parser.add_argument("--bound-query", action="store_true", help="run a masked min-max bound experiment for P(Y=1 | do(Z=z))")
-parser.add_argument("--bound-treatment", default="Z", help="treatment variable for bound experiments")
+parser.add_argument("--bound-query", action="store_true", help="run a masked min-max bound experiment for P(Y=1 | do(X=x))")
+parser.add_argument("--bound-treatment", default="X", help="treatment variable for bound experiments")
 parser.add_argument("--bound-outcome", default="Y", help="outcome variable for bound experiments")
 parser.add_argument("--bound-outcome-value", type=int, default=1, help="outcome value for bound experiments")
 parser.add_argument("--bound-treatment-value", action="append", type=int, default=[],

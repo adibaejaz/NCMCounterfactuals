@@ -36,7 +36,7 @@ architectures = {
 
 gan_choices = {"vanilla", "bgan", "wgan", "wgangp"}
 valid_graphs = {"backdoor", "bow", "frontdoor", "napkin", "simple", "chain", "bdm", "med", "expl", "double_bow", "iv", "bad_fd",
-                "extended_bow", "bad_m", "m",
+                "extended_bow", "bad_m", "m", "square", "four_clique",
                 "zid_a", "zid_b", "zid_c",
                 "gid_a", "gid_b", "gid_c", "gid_d",
                 "med_c1", "med_c2",

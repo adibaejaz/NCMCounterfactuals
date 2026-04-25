@@ -1,4 +1,5 @@
 import sys
+import itertools
 from contextlib import contextmanager
 
 import numpy as np
@@ -236,12 +237,204 @@ def _backdoor_query_bound_metrics(
     }
 
 
+def _conditional_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        given_var,
+        given_value,
+        n,
+        truth_kwargs,
+        stored):
+    cond_key = "true_{}".format(serialize_probability(
+        outcome_event,
+        cond_vals={given_var: given_value}))
+    return _metric_event_probability(
+        metrics,
+        stored,
+        cond_key,
+        truth,
+        outcome_event,
+        n,
+        truth_kwargs,
+        given={given_var: given_value})
+
+
+def _adjusted_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        adjustment_vars,
+        do_name,
+        n,
+        truth_kwargs,
+        stored):
+    adjusted = 0.0
+    adjustment_vars = tuple(adjustment_vars)
+    for adjustment_values in itertools.product((0, 1), repeat=len(adjustment_vars)):
+        adjustment_event = dict(zip(adjustment_vars, adjustment_values))
+        adjust_key = "true_{}".format(serialize_probability(adjustment_event))
+        p_adjust = _metric_event_probability(
+            metrics,
+            stored,
+            adjust_key,
+            truth,
+            adjustment_event,
+            n,
+            truth_kwargs)
+
+        cond_vals = {treatment_var: treatment_value, **adjustment_event}
+        cond_key = "true_{}".format(serialize_probability(
+            outcome_event,
+            cond_vals=cond_vals))
+        p_y_given_t_adjust = _metric_event_probability(
+            metrics,
+            stored,
+            cond_key,
+            truth,
+            outcome_event,
+            n,
+            truth_kwargs,
+            given=cond_vals)
+        adjusted += p_y_given_t_adjust * p_adjust
+
+    adjusted_key = "true_adjusted_{}_{}".format("_".join(adjustment_vars), do_name)
+    metrics[adjusted_key] = adjusted
+    return adjusted
+
+
+def _square_query_bound_metrics(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        do_name,
+        n,
+        truth_kwargs,
+        stored):
+    z_conditional = _conditional_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        "Z",
+        treatment_value,
+        n,
+        truth_kwargs,
+        stored)
+    z_adjusted = _adjusted_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        ("Z",),
+        do_name,
+        n,
+        truth_kwargs,
+        stored)
+    w_adjusted = _adjusted_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        ("W",),
+        do_name,
+        n,
+        truth_kwargs,
+        stored)
+
+    values = [z_conditional, z_adjusted, w_adjusted]
+    return {
+        "conditional_z": z_conditional,
+        "adjusted_z": z_adjusted,
+        "adjusted_w": w_adjusted,
+        "lower": min(values),
+        "upper": max(values),
+    }
+
+
+def _four_clique_query_bound_metrics(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        do_name,
+        n,
+        truth_kwargs,
+        stored):
+    candidates = _chain_query_bound_metrics(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        do_name,
+        n,
+        truth_kwargs,
+        stored)
+    zw_adjusted = _adjusted_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        ("Z", "W"),
+        do_name,
+        n,
+        truth_kwargs,
+        stored)
+    z_adjusted = _adjusted_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        ("Z",),
+        do_name,
+        n,
+        truth_kwargs,
+        stored)
+    w_adjusted = _adjusted_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        ("W",),
+        do_name,
+        n,
+        truth_kwargs,
+        stored)
+
+    values = [
+        candidates["marginal"],
+        candidates["conditional"],
+        zw_adjusted,
+        z_adjusted,
+        w_adjusted,
+    ]
+    return {
+        "marginal": candidates["marginal"],
+        "conditional": candidates["conditional"],
+        "adjusted_zw": zw_adjusted,
+        "adjusted_z": z_adjusted,
+        "adjusted_w": w_adjusted,
+        "lower": min(values),
+        "upper": max(values),
+    }
+
+
 def scm_query_bound_metrics(
         truth,
         graph_name=None,
         outcome_var="Y",
         outcome_value=1,
-        treatment_var="Z",
+        treatment_var="X",
         treatment_values=(0, 1),
         n=1000000,
         stored=None,
@@ -257,6 +450,28 @@ def scm_query_bound_metrics(
 
         if graph_name == "backdoor":
             bound = _backdoor_query_bound_metrics(
+                metrics,
+                truth,
+                outcome_event,
+                treatment_var,
+                treatment_value,
+                do_name,
+                n,
+                truth_kwargs,
+                stored)
+        elif graph_name == "square":
+            bound = _square_query_bound_metrics(
+                metrics,
+                truth,
+                outcome_event,
+                treatment_var,
+                treatment_value,
+                do_name,
+                n,
+                truth_kwargs,
+                stored)
+        elif graph_name == "four_clique":
+            bound = _four_clique_query_bound_metrics(
                 metrics,
                 truth,
                 outcome_event,

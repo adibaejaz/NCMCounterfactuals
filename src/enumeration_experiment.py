@@ -26,7 +26,7 @@ VALID_GENERATORS = {
 
 VALID_GRAPHS = {
     "backdoor", "bow", "frontdoor", "napkin", "simple", "chain", "bdm", "med", "expl", "double_bow", "iv", "bad_fd",
-    "extended_bow", "bad_m", "m",
+    "extended_bow", "bad_m", "m", "square", "four_clique",
     "zid_a", "zid_b", "zid_c",
     "gid_a", "gid_b", "gid_c", "gid_d",
     "med_c1", "med_c2",
@@ -89,7 +89,7 @@ def build_parser():
     parser.add_argument("--graph", default="backdoor", choices=sorted(VALID_GRAPHS))
     parser.add_argument("--query-track", default="ate")
     parser.add_argument("--bound-query", action="store_true")
-    parser.add_argument("--bound-treatment", default="Z")
+    parser.add_argument("--bound-treatment", default="X")
     parser.add_argument("--bound-outcome", default="Y")
     parser.add_argument("--bound-outcome-value", type=int, default=1)
     parser.add_argument("--bound-treatment-value", action="append", type=int, default=[])
