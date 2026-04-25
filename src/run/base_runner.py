@@ -109,6 +109,46 @@ class BaseRunner:
             key, self.pipeline_name, self.ncm_model_name, hp_payload)
         return self._hash_to_seed(payload)
 
+    def run_metadata(self, cg_file, n, dim, trial_index, key, run_key, data_seed=None,
+                     train_seed=None, train_seeds=None, extra=None):
+        metadata = {
+            "data_key": key,
+            "run_key": run_key,
+            "graph_file": cg_file,
+            "n_samples": n,
+            "dim": dim,
+            "trial_index": trial_index,
+            "runner": type(self).__name__,
+            "pipeline": self.pipeline_name,
+            "dat_model": self.dat_model_name,
+            "ncm_model": self.ncm_model_name,
+        }
+        if data_seed is not None:
+            metadata["data_seed"] = int(data_seed)
+        if train_seed is not None:
+            metadata["train_seed"] = int(train_seed)
+        if train_seeds is not None:
+            metadata["train_seeds"] = [int(seed) for seed in train_seeds]
+        if extra:
+            metadata.update(extra)
+        return metadata
+
+    def serializable_hyperparams(self, hyperparams, metadata=None):
+        new_hp = {k: str(v) for (k, v) in hyperparams.items()}
+        if metadata:
+            for key in ("data_seed", "train_seed", "train_seeds", "data_key", "run_key"):
+                if key in metadata:
+                    new_hp[key] = str(metadata[key])
+        return new_hp
+
+    def write_run_metadata(self, directory, metadata, hyperparams=None):
+        os.makedirs(directory, exist_ok=True)
+        if hyperparams is not None:
+            with open(os.path.join(directory, "hyperparams.json"), "w") as file:
+                json.dump(self.serializable_hyperparams(hyperparams, metadata), file)
+        with open(os.path.join(directory, "run_metadata.json"), "w") as file:
+            json.dump(metadata, file)
+
     def get_latest_checkpoint(self, directory):
         checkpoints = glob.glob(os.path.join(directory, "checkpoints", "*.ckpt"))
         if not checkpoints:

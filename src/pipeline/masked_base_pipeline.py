@@ -26,15 +26,19 @@ class MaskedBasePipeline(BasePipeline):
             learn_mask=True,
             fixed_zero_edges=None,
             fixed_zero_mask=None,
+            fixed_one_edges=None,
+            fixed_one_mask=None,
             mask_init_mode="constant",
             mask_init_value=0.5,
             mask_init_range=(0.25, 0.75),
             use_dag_updates=DEFAULT_USE_DAG_UPDATES):
         super().__init__(generator, do_var_list, dat_sets, cg, dim, ncm, batch_size=batch_size)
 
-        self.fixed_zero_mask = self._build_fixed_zero_mask(
+        self.fixed_zero_mask, self.fixed_one_mask = self._build_fixed_masks(
             fixed_zero_edges=fixed_zero_edges,
             fixed_zero_mask=fixed_zero_mask,
+            fixed_one_edges=fixed_one_edges,
+            fixed_one_mask=fixed_one_mask,
         )
 
         if init_mask is None:
@@ -43,7 +47,7 @@ class MaskedBasePipeline(BasePipeline):
                 value=mask_init_value,
                 value_range=mask_init_range)
 
-        init_mask = (init_mask.float() * self.fixed_zero_mask.cpu())
+        init_mask = self._apply_fixed_masks(init_mask.float())
         if learn_mask:
             eps = 1e-6
             init_logits = logit(init_mask.clamp(min=eps, max=1 - eps))
@@ -74,12 +78,18 @@ class MaskedBasePipeline(BasePipeline):
         for param in self.theta_parameters():
             param.requires_grad_(flag)
 
-    def _build_fixed_zero_mask(self, fixed_zero_edges=None, fixed_zero_mask=None):
+    def _build_fixed_masks(
+            self,
+            fixed_zero_edges=None,
+            fixed_zero_mask=None,
+            fixed_one_edges=None,
+            fixed_one_mask=None):
         n = len(self.ncm.v)
-        mask = T.ones((n, n), dtype=T.float)
+        zero_mask = T.ones((n, n), dtype=T.float)
+        one_mask = T.zeros((n, n), dtype=T.float)
 
         eye = T.eye(n, dtype=T.float)
-        mask = mask * (1 - eye)
+        zero_mask = zero_mask * (1 - eye)
 
         if fixed_zero_mask is not None:
             fixed_zero_mask = fixed_zero_mask.float()
@@ -87,17 +97,39 @@ class MaskedBasePipeline(BasePipeline):
                 raise ValueError(
                     "fixed_zero_mask must have shape ({}, {}), got {}".format(
                         n, n, tuple(fixed_zero_mask.shape)))
-            mask = mask * fixed_zero_mask
+            zero_mask = zero_mask * fixed_zero_mask
 
         if fixed_zero_edges is not None:
             v2i = {v: i for i, v in enumerate(self.ncm.v)}
             for src, dst in fixed_zero_edges:
                 if src not in v2i or dst not in v2i:
                     raise ValueError("unknown fixed-zero edge {} -> {}".format(src, dst))
-                mask[v2i[src], v2i[dst]] = 0.0
+                zero_mask[v2i[src], v2i[dst]] = 0.0
 
-        self.register_buffer("fixed_zero_mask", mask)
-        return self.fixed_zero_mask
+        if fixed_one_mask is not None:
+            fixed_one_mask = fixed_one_mask.float()
+            if fixed_one_mask.shape != (n, n):
+                raise ValueError(
+                    "fixed_one_mask must have shape ({}, {}), got {}".format(
+                        n, n, tuple(fixed_one_mask.shape)))
+            one_mask = T.maximum(one_mask, fixed_one_mask)
+
+        if fixed_one_edges is not None:
+            v2i = {v: i for i, v in enumerate(self.ncm.v)}
+            for src, dst in fixed_one_edges:
+                if src not in v2i or dst not in v2i:
+                    raise ValueError("unknown fixed-one edge {} -> {}".format(src, dst))
+                one_mask[v2i[src], v2i[dst]] = 1.0
+
+        one_mask = (one_mask > 0).float()
+        if T.any(one_mask * eye):
+            raise ValueError("fixed-one mask cannot include self-edges")
+        if T.any(one_mask * (1 - zero_mask)):
+            raise ValueError("an edge cannot be fixed to both 0 and 1")
+
+        self.register_buffer("fixed_zero_mask", zero_mask)
+        self.register_buffer("fixed_one_mask", one_mask)
+        return self.fixed_zero_mask, self.fixed_one_mask
 
     def _init_mask(self, mode="constant", value=0.5, value_range=(0.25, 0.75)):
         n = len(self.ncm.v)
@@ -117,12 +149,17 @@ class MaskedBasePipeline(BasePipeline):
 
         return mask * (1 - eye)
 
+    def _apply_fixed_masks(self, mask):
+        zero_mask = self.fixed_zero_mask.to(device=mask.device, dtype=mask.dtype)
+        one_mask = self.fixed_one_mask.to(device=mask.device, dtype=mask.dtype)
+        return mask * zero_mask * (1 - one_mask) + one_mask
+
     def get_mask(self):
         if self.learn_mask:
             mask = T.sigmoid(self.mask_parameter)
         else:
             mask = self.mask_parameter
-        return mask * self.fixed_zero_mask.to(device=mask.device, dtype=mask.dtype)
+        return self._apply_fixed_masks(mask)
 
     def get_edge_scores(self):
         return self.get_mask()

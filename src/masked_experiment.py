@@ -140,6 +140,8 @@ parser.add_argument('--mask-init-high', type=float, default=0.75,
                     help="upper bound for uniform mask initialization")
 parser.add_argument('--mask-fixed-zero', action='append', default=[],
                     help="edge to constrain to 0, formatted as SRC->DST; may be repeated")
+parser.add_argument('--mask-fixed-one', action='append', default=[],
+                    help="edge to constrain to 1, formatted as SRC->DST; may be repeated")
 parser.add_argument('--cycle-lambda', type=float, default=0.0,
                     help="weight on the DAG penalty")
 parser.add_argument('--cycle-penalty', default="dagma", choices=["notears", "dagma"],
@@ -189,18 +191,26 @@ def _print_query_info(eval_query):
     print("\n")
 
 
-def _parse_fixed_zero_edges(specs):
+def _parse_fixed_edges(specs, label):
     edges = []
     for spec in specs:
         if "->" not in spec:
-            raise ValueError("fixed-zero edge '{}' must have form SRC->DST".format(spec))
+            raise ValueError("{} edge '{}' must have form SRC->DST".format(label, spec))
         src, dst = spec.split("->", 1)
         src = src.strip()
         dst = dst.strip()
         if not src or not dst:
-            raise ValueError("fixed-zero edge '{}' must have non-empty SRC and DST".format(spec))
+            raise ValueError("{} edge '{}' must have non-empty SRC and DST".format(label, spec))
         edges.append((src, dst))
     return edges
+
+
+def _parse_fixed_zero_edges(specs):
+    return _parse_fixed_edges(specs, "fixed-zero")
+
+
+def _parse_fixed_one_edges(specs):
+    return _parse_fixed_edges(specs, "fixed-one")
 
 
 def _build_bound_queries(graph_name, treatment_var, treatment_value, outcome_var, outcome_value):
@@ -303,6 +313,7 @@ def main():
         'mask-init-value': args.mask_init_value,
         'mask-init-range': (args.mask_init_low, args.mask_init_high),
         'mask-fixed-zero-edges': _parse_fixed_zero_edges(args.mask_fixed_zero),
+        'mask-fixed-one-edges': _parse_fixed_one_edges(args.mask_fixed_one),
         'cycle-lambda': args.cycle_lambda,
         'cycle-penalty': args.cycle_penalty,
         'dagma-s': args.dagma_s,

@@ -88,6 +88,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             learn_mask=hyperparams.get('learn-mask', True),
             fixed_zero_edges=hyperparams.get('mask-fixed-zero-edges', None),
             fixed_zero_mask=hyperparams.get('mask-fixed-zero-mask', None),
+            fixed_one_edges=hyperparams.get('mask-fixed-one-edges', None),
+            fixed_one_mask=hyperparams.get('mask-fixed-one-mask', None),
             mask_init_mode=hyperparams.get('mask-init-mode', 'constant'),
             mask_init_value=hyperparams.get('mask-init-value', 0.5),
             mask_init_range=hyperparams.get('mask-init-range', (0.25, 0.75)),

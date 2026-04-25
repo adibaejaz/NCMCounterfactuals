@@ -1,5 +1,7 @@
 import argparse
 import os
+import glob
+import json
 
 import numpy as np
 import torch as T
@@ -9,6 +11,7 @@ from src.ds.causal_graph import CausalGraph
 from src.metric.queries import get_experimental_variables, get_query
 from src.pipeline import DivergencePipeline
 from src.run import EnumerationNCMRunner
+from src.run.data_setup import build_reused_data_bundle
 from src.scm.ctm import CTM
 from src.scm.model_classes import RoundModel, XORModel
 from src.scm.ncm import FF_NCM
@@ -52,6 +55,29 @@ def _graph_has_vars(graph_name, required_vars):
     return set(required_vars).issubset(set(cg.v))
 
 
+def _find_reuse_source(root_dir, graph, n, dim, trial_index, train_seed_offset):
+    pattern = os.path.join(
+        root_dir,
+        "gen=CTM-graph={}-n_samples={}-dim={}-trial_index={}-run=*".format(graph, n, dim, trial_index),
+        "hyperparams.json",
+    )
+    matches = []
+    for hp_path in glob.glob(pattern):
+        with open(hp_path) as file:
+            hyperparams = json.load(file)
+        if int(hyperparams.get("train-seed-offset", 0)) == int(train_seed_offset):
+            matches.append(os.path.dirname(hp_path))
+    if not matches:
+        raise ValueError(
+            "no reuse-data source found under {} for graph={}, n={}, dim={}, trial_index={}, train-seed-offset={}".format(
+                root_dir, graph, n, dim, trial_index, train_seed_offset))
+    if len(matches) > 1:
+        raise ValueError(
+            "multiple reuse-data sources found under {} for graph={}, n={}, dim={}, trial_index={}, train-seed-offset={}: {}".format(
+                root_dir, graph, n, dim, trial_index, train_seed_offset, matches))
+    return matches[0]
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Enumerate a DAG equivalence class and train one DAG NCM per member")
     parser.add_argument("name", help="name of the experiment")
@@ -73,6 +99,12 @@ def build_parser():
                         help="number of training-seed reruns per dataset; each rerun takes min/max over the DAG class")
     parser.add_argument("--train-seed-offset", type=int, default=0,
                         help="offset added to the per-DAG training seed without changing the data seed")
+    parser.add_argument("--reuse-data-from",
+                        help="path to a saved run directory or dat.th file whose exact dataset should be reused")
+    parser.add_argument("--reuse-data-root",
+                        help="root directory of saved runs to search by trial_index and train-seed-offset")
+    parser.add_argument("--data-seed-search-limit", type=int, default=1000,
+                        help="max increments past the base data seed when recovering a reused dataset")
     parser.add_argument("--n-samples", type=int, default=10000)
     parser.add_argument("--dim", type=int, default=1)
     parser.add_argument("--gpu")
@@ -169,6 +201,34 @@ def main():
             if trial_index < 0:
                 raise ValueError("--trial-index values must be nonnegative")
             cg_file = "dat/cg/{}.cg".format(args.graph)
+            data_bundle = None
+            if args.reuse_data_from or args.reuse_data_root:
+                if args.reuse_data_from and args.reuse_data_root:
+                    raise ValueError("use only one of --reuse-data-from or --reuse-data-root")
+                source_path = args.reuse_data_from
+                if args.reuse_data_root:
+                    source_path = _find_reuse_source(
+                        args.reuse_data_root,
+                        args.graph,
+                        n,
+                        d,
+                        trial_index,
+                        args.train_seed_offset,
+                    )
+                key = runner.get_key(cg_file, n, d, trial_index)
+                base_seed = runner.get_data_seed(key)
+                data_bundle, recovered_seed = build_reused_data_bundle(
+                    VALID_GENERATORS[args.gen],
+                    cg_file,
+                    n,
+                    d,
+                    hyperparams,
+                    base_seed,
+                    source_path,
+                    max_seed_steps=args.data_seed_search_limit,
+                )
+                print("Reused data from:", source_path)
+                print("Recovered data seed:", recovered_seed)
             runner.run(
                 args.name,
                 cg_file,
@@ -177,6 +237,7 @@ def main():
                 trial_index,
                 hyperparams=hyperparams,
                 gpu=gpu_used,
+                data_bundle=data_bundle,
                 verbose=args.verbose,
             )
 
