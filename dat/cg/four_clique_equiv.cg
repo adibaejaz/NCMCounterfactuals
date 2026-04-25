@@ -1,0 +1,13 @@
+<NODES>
+Z
+X
+Y
+W
+
+<EDGES>
+X -- Z
+X -- Y
+X -- W
+W -- Z
+W -- Y
+Z -- Y
