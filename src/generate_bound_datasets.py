@@ -150,36 +150,51 @@ def _generate_candidate(cg, n, dim, hyperparams, do_var_list, seed):
     for do_set in do_var_list:
         expanded_do = {k: expand_do(v, n=n) for (k, v) in do_set.items()}
         dat_sets.append(dat_m(n=n, do=expanded_do))
-    stored_metrics = _build_stored_metrics(dat_m, dat_sets, do_var_list)
-    return dat_m, dat_sets, stored_metrics
+    return dat_m, dat_sets
 
 
 def _bound_diagnostics(dat_m, args):
+    treatment_values = tuple(sorted({0, 1, args.bound_treatment_value}))
     metrics = scm_query_bound_metrics(
         dat_m,
         graph_name=args.graph,
         outcome_var=args.bound_outcome,
         outcome_value=args.bound_outcome_value,
         treatment_var=args.bound_treatment,
-        treatment_values=(args.bound_treatment_value,),
+        treatment_values=treatment_values,
         n=args.bound_mc_samples,
     )
-    do_name = serialize_probability(
-        {args.bound_outcome: args.bound_outcome_value},
-        do_vals={args.bound_treatment: args.bound_treatment_value})
-    lower_key = "true_lower_{}".format(do_name)
-    upper_key = "true_upper_{}".format(do_name)
-    lower = float(metrics[lower_key])
-    upper = float(metrics[upper_key])
+
+    bounds_by_treatment_value = {}
+    for treatment_value in treatment_values:
+        do_name = serialize_probability(
+            {args.bound_outcome: args.bound_outcome_value},
+            do_vals={args.bound_treatment: treatment_value})
+        lower_key = "true_lower_{}".format(do_name)
+        upper_key = "true_upper_{}".format(do_name)
+        lower = float(metrics[lower_key])
+        upper = float(metrics[upper_key])
+        bounds_by_treatment_value[str(treatment_value)] = {
+            "query": do_name,
+            "lower_key": lower_key,
+            "upper_key": upper_key,
+            "lower": lower,
+            "upper": upper,
+            "gap": upper - lower,
+        }
+
+    selected = bounds_by_treatment_value[str(args.bound_treatment_value)]
     return {
-        "query": do_name,
+        "query": selected["query"],
         "bound_mc_samples": int(args.bound_mc_samples),
-        "lower_key": lower_key,
-        "upper_key": upper_key,
-        "lower": lower,
-        "upper": upper,
-        "gap": upper - lower,
-        "passed": bool((upper - lower) >= args.bound_gap_min),
+        "acceptance_treatment_value": int(args.bound_treatment_value),
+        "lower_key": selected["lower_key"],
+        "upper_key": selected["upper_key"],
+        "lower": selected["lower"],
+        "upper": selected["upper"],
+        "gap": selected["gap"],
+        "passed": bool(selected["gap"] >= args.bound_gap_min),
+        "bounds_by_treatment_value": bounds_by_treatment_value,
         "metrics": {k: float(v) for (k, v) in metrics.items()},
     }
 
@@ -204,6 +219,7 @@ def _append_jsonl(path, obj):
 
 def _save_accepted(
         out_dir,
+        graph,
         dat_sets,
         stored_metrics,
         hyperparams,
@@ -212,11 +228,16 @@ def _save_accepted(
         positivity_diagnostics):
     os.makedirs(out_dir, exist_ok=True)
     T.save(dat_sets, os.path.join(out_dir, "dat.th"))
+    T.save(dat_sets, os.path.join(out_dir, "{}_dat.th".format(graph)))
     T.save(stored_metrics, os.path.join(out_dir, "stored_metrics.th"))
+    T.save(stored_metrics, os.path.join(out_dir, "{}_stored_metrics.th".format(graph)))
     _write_json(os.path.join(out_dir, "hyperparams.json"), {k: str(v) for (k, v) in hyperparams.items()})
     _write_json(os.path.join(out_dir, "data_metadata.json"), metadata)
+    _write_json(os.path.join(out_dir, "{}_data_metadata.json".format(graph)), metadata)
     _write_json(os.path.join(out_dir, "ground_truth_bounds.json"), bound_diagnostics)
+    _write_json(os.path.join(out_dir, "{}_ground_truth_bounds.json".format(graph)), bound_diagnostics)
     _write_json(os.path.join(out_dir, "positivity_diagnostics.json"), positivity_diagnostics)
+    _write_json(os.path.join(out_dir, "{}_positivity_diagnostics.json".format(graph)), positivity_diagnostics)
 
 
 def _candidate_seed(args, trial_index, retry_index, hyperparams, do_var_list):
@@ -238,6 +259,12 @@ def _candidate_seed(args, trial_index, retry_index, hyperparams, do_var_list):
     })
 
 
+def _default_positivity_epsilon(cg):
+    if len(cg.v) <= 3:
+        return 0.01
+    return 0.005
+
+
 def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
     out_dir = _trial_directory(args.name, args.graph, args.n_samples, args.dim, trial_index)
     if os.path.isfile(os.path.join(out_dir, "dat.th")) and not args.overwrite:
@@ -254,7 +281,7 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
         print("[candidate] graph={} trial={} retry={} seed={}".format(
             args.graph, trial_index, retry_index, seed))
 
-        dat_m, dat_sets, stored_metrics = _generate_candidate(
+        dat_m, dat_sets = _generate_candidate(
             cg=cg,
             n=args.n_samples,
             dim=args.dim,
@@ -295,8 +322,10 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
         }
 
         if not reject_reasons:
+            stored_metrics = _build_stored_metrics(dat_m, dat_sets, do_var_list)
             _save_accepted(
                 out_dir=out_dir,
+                graph=args.graph,
                 dat_sets=dat_sets,
                 stored_metrics=stored_metrics,
                 hyperparams=hyperparams,
@@ -330,7 +359,7 @@ def build_parser():
     parser.add_argument("--n-samples", type=int, default=10000)
     parser.add_argument("--dim", type=int, default=1)
     parser.add_argument("--regions", type=int, default=20)
-    parser.add_argument("--c2-scale", type=float, default=1.0)
+    parser.add_argument("--c2-scale", type=float, default=2.0)
     parser.add_argument("--gen-bs", type=int, default=10000)
 
     parser.add_argument("--do-regime", default="obs", choices=["obs", "obs-x", "graph-default"],
@@ -345,7 +374,8 @@ def build_parser():
     parser.add_argument("--bound-gap-min", type=float, default=0.1)
     parser.add_argument("--bound-mc-samples", type=int, default=1000000)
 
-    parser.add_argument("--positivity-epsilon", type=float, default=0.01)
+    parser.add_argument("--positivity-epsilon", type=float, default=None,
+                        help="minimum true joint cell probability; defaults to 0.01 for <=3 nodes and 0.005 otherwise")
     parser.add_argument("--positivity-mc-samples", type=int, default=1000000)
     parser.add_argument("--min-empirical-cell-count", type=int, default=10)
     parser.add_argument("--max-retries", type=int, default=1000)
@@ -362,6 +392,8 @@ def main():
 
     cg_file = "dat/cg/{}.cg".format(args.graph)
     cg = CausalGraph.read(cg_file)
+    if args.positivity_epsilon is None:
+        args.positivity_epsilon = _default_positivity_epsilon(cg)
     required_vars = {args.bound_treatment, args.bound_outcome}
     if not required_vars.issubset(set(cg.v)):
         raise ValueError("graph {} does not contain {}".format(args.graph, sorted(required_vars)))

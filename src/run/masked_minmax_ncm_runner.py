@@ -32,13 +32,25 @@ class MaskedNCMMinMaxRunner(BaseRunner):
     def __init__(self, pipeline, dat_model, ncm_model):
         super().__init__(pipeline, dat_model, ncm_model)
 
-    def create_trainer(self, directory, max_epochs, r, gpu=None, phase=None):
+    def create_trainer(self, directory, max_epochs, r, gpu=None, phase=None,
+                       early_stop_patience=100, early_stop_min_delta=1e-6):
         checkpoint_dir = f'{directory}/{r}/checkpoints/'
         if phase is not None:
             checkpoint_dir = f'{directory}/{r}/checkpoints_{phase}/'
-        checkpoint = pl.callbacks.ModelCheckpoint(dirpath=checkpoint_dir, monitor="objective_loss")
+        checkpoint = pl.callbacks.ModelCheckpoint(
+            dirpath=checkpoint_dir,
+            monitor="objective_loss",
+            save_last=True,
+        )
         return pl.Trainer(
-            callbacks=[checkpoint],
+            callbacks=[
+                checkpoint,
+                pl.callbacks.EarlyStopping(
+                    monitor="objective_loss",
+                    patience=early_stop_patience,
+                    min_delta=early_stop_min_delta,
+                    check_on_train_epoch_end=True),
+            ],
             max_epochs=max_epochs,
             accumulate_grad_batches=1,
             logger=pl.loggers.TensorBoardLogger(f'{directory}/{r}/logs/'),
@@ -194,10 +206,16 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                                               hyperparams=hyperparams, ncm_model=self.ncm_model,
                                               max_query=hyperparams.get('max-query-2', None))
 
+                        early_stop_patience = int(hyperparams.get('early-stop-patience', 100))
+                        early_stop_min_delta = float(hyperparams.get('early-stop-min-delta', 1e-6))
                         trainer_max, checkpoint_max = self.create_trainer(
-                            d, hyperparams.get('max-query-iters', 3000), r, gpu)
+                            d, hyperparams.get('max-query-iters', 3000), r, gpu,
+                            early_stop_patience=early_stop_patience,
+                            early_stop_min_delta=early_stop_min_delta)
                         trainer_min, checkpoint_min = self.create_trainer(
-                            d, hyperparams.get('max-query-iters', 3000), r, gpu)
+                            d, hyperparams.get('max-query-iters', 3000), r, gpu,
+                            early_stop_patience=early_stop_patience,
+                            early_stop_min_delta=early_stop_min_delta)
 
                         print("\nTraining max model...")
                         stored_metrics = self.print_metrics(
@@ -228,7 +246,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                                 theta_lr=theta_only_extra_lr,
                                 final_query_reg=hyperparams.get('theta-only-final-query-reg', True))
                             trainer_max_extra, checkpoint_max_extra = self.create_trainer(
-                                d, theta_only_extra_epochs, r, gpu, phase='theta_only_max')
+                                d, theta_only_extra_epochs, r, gpu, phase='theta_only_max',
+                                early_stop_patience=early_stop_patience,
+                                early_stop_min_delta=early_stop_min_delta)
                             trainer_max_extra.fit(m_max)
                             if checkpoint_max_extra.best_model_path:
                                 ckpt_max = T.load(checkpoint_max_extra.best_model_path)
@@ -239,7 +259,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                                 theta_lr=theta_only_extra_lr,
                                 final_query_reg=hyperparams.get('theta-only-final-query-reg', True))
                             trainer_min_extra, checkpoint_min_extra = self.create_trainer(
-                                d, theta_only_extra_epochs, r, gpu, phase='theta_only_min')
+                                d, theta_only_extra_epochs, r, gpu, phase='theta_only_min',
+                                early_stop_patience=early_stop_patience,
+                                early_stop_min_delta=early_stop_min_delta)
                             trainer_min_extra.fit(m_min)
                             if checkpoint_min_extra.best_model_path:
                                 ckpt_min = T.load(checkpoint_min_extra.best_model_path)

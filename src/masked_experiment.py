@@ -13,6 +13,8 @@ threading masked-specific arguments through the older unmasked CLI.
 import itertools
 import os
 import argparse
+import json
+from pathlib import Path
 
 import numpy as np
 import torch as T
@@ -22,6 +24,7 @@ from src.ds.causal_graph import CausalGraph
 from src.metric.queries import get_query, get_experimental_variables, is_q_id_in_G
 from src.pipeline import MaskedDivergencePipeline
 from src.run import MaskedNCMMinMaxRunner, MaskedNCMRunner
+from src.run.data_setup import DataBundle, _build_dat_model
 from src.scm.ctm import CTM
 from src.scm.masked_scm import (
     DEFAULT_GATE_SHARPNESS,
@@ -90,6 +93,8 @@ parser.add_argument('--no-positivity', action="store_true", help="does not enfor
 
 parser.add_argument("--query-track", default="ate", help="choice of query to track")
 parser.add_argument("--bound-query", action="store_true", help="run a masked min-max bound experiment for P(Y=1 | do(X=x))")
+parser.add_argument("--bound-query-track", choices=sorted(valid_queries),
+                    help="directly optimize a named query in bound mode, e.g. ate")
 parser.add_argument("--bound-treatment", default="X", help="treatment variable for bound experiments")
 parser.add_argument("--bound-outcome", default="Y", help="outcome variable for bound experiments")
 parser.add_argument("--bound-outcome-value", type=int, default=1, help="outcome value for bound experiments")
@@ -99,6 +104,10 @@ parser.add_argument("--id-reruns", type=int, default=1, help="number of min-max 
 parser.add_argument("--train-seed-offset", type=int, default=0,
                     help="offset added to min-max model initialization seeds without changing data seeds")
 parser.add_argument("--max-query-iters", type=int, default=3000, help="number of min-max training epochs")
+parser.add_argument("--early-stop-patience", type=int, default=100,
+                    help="stop min-max training after this many epochs without sufficient objective_loss improvement")
+parser.add_argument("--early-stop-min-delta", type=float, default=1e-6,
+                    help="minimum objective_loss improvement required to reset min-max early stopping patience")
 parser.add_argument("--max-lambda", type=float, default=1.0, help="initial query regularization weight")
 parser.add_argument("--min-lambda", type=float, default=0.001, help="final query regularization weight")
 parser.add_argument("--mc-sample-size", type=int, default=10000, help="sample size for query optimization")
@@ -106,6 +115,10 @@ parser.add_argument("--theta-only-extra-epochs", type=int, default=0,
                     help="after min-max training, freeze learned masks and train theta only for this many extra epochs")
 parser.add_argument("--theta-only-extra-lr", type=float, default=None,
                     help="theta learning rate for --theta-only-extra-epochs; defaults to --theta-lr/--lr")
+parser.add_argument("--reuse-data-from",
+                    help="path to one generated dataset directory or dat.th file to reuse")
+parser.add_argument("--reuse-data-root",
+                    help="root directory of generated datasets to reuse by graph/n/dim/trial_index")
 
 parser.add_argument('--graph', '-G', default="standard", help="name of preset graph")
 parser.add_argument('--n-trials', '-t', type=int, default=1, help="number of trials")
@@ -237,9 +250,69 @@ def _build_bound_queries(graph_name, treatment_var, treatment_value, outcome_var
     return eval_query, opt_query, query_bounds
 
 
+def _query_display_name(eval_query):
+    if isinstance(eval_query, CTF):
+        return eval_query.name
+    if eval_query:
+        return eval_query[0][0].name
+    return str(eval_query)
+
+
 def _graph_has_vars(graph_name, required_vars):
     cg = CausalGraph.read("dat/cg/{}.cg".format(graph_name))
     return set(required_vars).issubset(set(cg.v))
+
+
+def _coerce_generated_hyperparams(raw_hyperparams):
+    hyperparams = dict()
+    for key in ("regions", "gen-bs"):
+        if key in raw_hyperparams:
+            hyperparams[key] = int(raw_hyperparams[key])
+    if "c2-scale" in raw_hyperparams:
+        hyperparams["c2-scale"] = float(raw_hyperparams["c2-scale"])
+    return hyperparams
+
+
+def _generated_dataset_dir(root_dir, graph, n, dim, trial_index):
+    return Path(root_dir) / "graph={}-n_samples={}-dim={}-trial_index={}".format(
+        graph, n, dim, trial_index)
+
+
+def _load_generated_data_bundle(source_path, graph, n, dim, hyperparams):
+    source_path = Path(source_path)
+    source_dir = source_path if source_path.is_dir() else source_path.parent
+    metadata_path = source_dir / "data_metadata.json"
+    if not metadata_path.is_file():
+        raise FileNotFoundError("generated data metadata not found at {}".format(metadata_path))
+
+    with open(metadata_path) as file:
+        metadata = json.load(file)
+    seed = int(metadata["candidate_seed"])
+
+    dat_path = source_path if source_path.is_file() else source_dir / "{}_dat.th".format(graph)
+    if not dat_path.is_file():
+        dat_path = source_dir / "dat.th"
+    if not dat_path.is_file():
+        raise FileNotFoundError("generated dataset not found at {}".format(dat_path))
+
+    stored_path = source_dir / "{}_stored_metrics.th".format(graph)
+    if not stored_path.is_file():
+        stored_path = source_dir / "stored_metrics.th"
+
+    generated_hp = dict(hyperparams)
+    generated_hp_path = source_dir / "hyperparams.json"
+    if generated_hp_path.is_file():
+        with open(generated_hp_path) as file:
+            generated_hp.update(_coerce_generated_hyperparams(json.load(file)))
+
+    cg = CausalGraph.read("dat/cg/{}.cg".format(graph))
+    dat_m = _build_dat_model(CTM, cg, dim, generated_hp, seed)
+    dat_sets = T.load(dat_path)
+    if stored_path.is_file():
+        stored_metrics = T.load(stored_path)
+    else:
+        stored_metrics = dict()
+    return DataBundle(cg=cg, dat_m=dat_m, dat_sets=dat_sets, stored_metrics=stored_metrics)
 
 
 def main():
@@ -249,10 +322,12 @@ def main():
     graph_choice = args.graph.lower()
     bound_mode = args.bound_query
     query_track = args.query_track.lower() if args.query_track is not None and not bound_mode else None
+    bound_query_track = args.bound_query_track.lower() if args.bound_query_track is not None else None
 
     assert gen_choice in valid_generators
     assert graph_choice in valid_graphs or graph_choice in graph_sets
     assert bound_mode or query_track is None or query_track in valid_queries
+    assert bound_query_track is None or bound_query_track in valid_queries
     assert not (args.learn_mask and args.fixed_mask)
     assert not args.alt_opt or not args.fixed_mask
     assert args.bound_outcome_value in {0, 1}
@@ -261,6 +336,9 @@ def main():
     assert (args.theta_steps_per_mask + args.mask_steps_per_theta) > 0
     assert args.theta_only_extra_epochs >= 0
     assert args.theta_only_extra_lr is None or args.theta_only_extra_lr > 0
+    assert args.early_stop_patience > 0
+    assert args.early_stop_min_delta >= 0
+    assert not (args.reuse_data_from and args.reuse_data_root)
     assert args.alm_rho_init > 0
     assert args.alm_rho_mult >= 1.0
     assert args.alm_rho_max >= args.alm_rho_init
@@ -302,6 +380,7 @@ def main():
         'query-track': query_track,
         'full-batch': args.full_batch,
         'positivity': not args.no_positivity,
+        'bound-query-track': bound_query_track,
         'mask-mode': args.mask_mode,
         'mask-threshold': args.mask_threshold,
         'gate-sharpness': args.gate_sharpness,
@@ -333,6 +412,8 @@ def main():
         'id-reruns': args.id_reruns,
         'train-seed-offset': args.train_seed_offset,
         'max-query-iters': args.max_query_iters,
+        'early-stop-patience': args.early_stop_patience,
+        'early-stop-min-delta': args.early_stop_min_delta,
         'max-lambda': args.max_lambda,
         'min-lambda': args.min_lambda,
         'mc-sample-size': args.mc_sample_size,
@@ -345,18 +426,30 @@ def main():
 
     if graph_choice in graph_sets:
         if bound_mode:
+            required_vars = (
+                {"X", "Y"} if bound_query_track is not None
+                else {args.bound_treatment, args.bound_outcome}
+            )
             graph_set = {
                 graph for graph in graph_sets[graph_choice]
-                if _graph_has_vars(graph, {args.bound_treatment, args.bound_outcome})
+                if _graph_has_vars(graph, required_vars)
             }
         else:
             graph_set = {graph for graph in graph_sets[graph_choice] if is_q_id_in_G(graph, query_track)}
     else:
-        if bound_mode and not _graph_has_vars(graph_choice, {args.bound_treatment, args.bound_outcome}):
-            raise ValueError("graph {} does not contain {} and {}".format(graph_choice, args.bound_treatment, args.bound_outcome))
+        if bound_mode:
+            required_vars = (
+                {"X", "Y"} if bound_query_track is not None
+                else {args.bound_treatment, args.bound_outcome}
+            )
+            if not _graph_has_vars(graph_choice, required_vars):
+                raise ValueError("graph {} does not contain {}".format(
+                    graph_choice, sorted(required_vars)))
         graph_set = {graph_choice}
 
     if bound_mode and not graph_set:
+        if bound_query_track is not None:
+            raise ValueError("no selected graphs contain X and Y")
         raise ValueError("no selected graphs contain {} and {}".format(args.bound_treatment, args.bound_outcome))
 
     if args.n_samples == -1:
@@ -381,16 +474,20 @@ def main():
     for graph in graph_set:
         do_var_list = get_experimental_variables(graph)
         if bound_mode:
-            query_jobs = [
-                _build_bound_queries(
-                    graph,
-                    args.bound_treatment,
-                    treatment_value,
-                    args.bound_outcome,
-                    args.bound_outcome_value,
-                )
-                for treatment_value in bound_values
-            ]
+            if bound_query_track is not None:
+                eval_query, opt_queries = get_query(graph, bound_query_track)
+                query_jobs = [(eval_query, opt_queries, None)]
+            else:
+                query_jobs = [
+                    _build_bound_queries(
+                        graph,
+                        args.bound_treatment,
+                        treatment_value,
+                        args.bound_outcome,
+                        args.bound_outcome_value,
+                    )
+                    for treatment_value in bound_values
+                ]
         else:
             eval_query, _ = get_query(graph, query_track)
             query_jobs = [(eval_query, (None, None), None)]
@@ -398,11 +495,14 @@ def main():
         for eval_query, opt_queries, query_bounds in query_jobs:
             hyperparams["do-var-list"] = do_var_list
             hyperparams["eval-query"] = eval_query
-            hyperparams["query-track"] = eval_query.name if bound_mode else query_track
+            hyperparams["query-track"] = _query_display_name(eval_query) if bound_mode else query_track
             if bound_mode:
                 hyperparams["max-query-1"] = opt_queries[0]
                 hyperparams["max-query-2"] = opt_queries[1]
-                hyperparams["query-bound-spec"] = query_bounds
+                if query_bounds is not None:
+                    hyperparams["query-bound-spec"] = query_bounds
+                else:
+                    hyperparams.pop("query-bound-spec", None)
             else:
                 hyperparams.pop("max-query-1", None)
                 hyperparams.pop("max-query-2", None)
@@ -433,6 +533,14 @@ def main():
 
                 for i in trial_indices:
                     cg_file = "dat/cg/{}.cg".format(graph)
+                    data_bundle = None
+                    if args.reuse_data_from or args.reuse_data_root:
+                        source_path = args.reuse_data_from
+                        if args.reuse_data_root:
+                            source_path = _generated_dataset_dir(
+                                args.reuse_data_root, graph, n, d, i)
+                        data_bundle = _load_generated_data_bundle(
+                            source_path, graph, n, d, hyperparams)
                     try:
                         if not runner.run(
                                 args.name,
@@ -442,6 +550,7 @@ def main():
                                 i,
                                 hyperparams=hyperparams,
                                 gpu=gpu_used,
+                                data_bundle=data_bundle,
                                 verbose=args.verbose):
                             continue
                     except Exception as e:
