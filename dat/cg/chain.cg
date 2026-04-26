@@ -5,4 +5,4 @@ Y
 
 <EDGES>
 X -> Z
-X -> Y
+Z -> Y
