@@ -315,11 +315,11 @@ def _square_query_bound_metrics(
         n,
         truth_kwargs,
         stored):
-    z_conditional = _conditional_query_candidate(
+    x_conditional = _conditional_query_candidate(
         metrics,
         truth,
         outcome_event,
-        "Z",
+        treatment_var,
         treatment_value,
         n,
         truth_kwargs,
@@ -347,9 +347,9 @@ def _square_query_bound_metrics(
         truth_kwargs,
         stored)
 
-    values = [z_conditional, z_adjusted, w_adjusted]
+    values = [x_conditional, z_adjusted, w_adjusted]
     return {
-        "conditional_z": z_conditional,
+        "conditional_x": x_conditional,
         "adjusted_z": z_adjusted,
         "adjusted_w": w_adjusted,
         "lower": min(values),
