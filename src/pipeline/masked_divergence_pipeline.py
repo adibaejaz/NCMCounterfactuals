@@ -25,6 +25,7 @@ from .masked_base_pipeline import (
 )
 
 DEFAULT_MASK_BINARY_LAMBDA = 0.0
+DEFAULT_MASK_NON_COLLIDER_LAMBDA = 0.1
 
 
 class MaskedDivergencePipeline(MaskedBasePipeline):
@@ -125,6 +126,10 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.register_buffer('alm_prev_h', T.tensor(float('inf')))
         self.mask_l1_lambda = hyperparams.get('mask-l1-lambda', DEFAULT_MASK_L1_LAMBDA)
         self.mask_binary_lambda = hyperparams.get('mask-binary-lambda', DEFAULT_MASK_BINARY_LAMBDA)
+        self.mask_non_collider_triples = list(hyperparams.get('mask-non-collider-triples', []))
+        self.mask_non_collider_lambda = hyperparams.get(
+            'mask-non-collider-lambda', DEFAULT_MASK_NON_COLLIDER_LAMBDA)
+        self._validate_non_collider_triples()
         self.theta_only_phase = hyperparams.get('theta-only-phase', False)
         self.final_query_reg = hyperparams.get('final-query-reg', False)
         self.ordered_v = cg.v
@@ -179,6 +184,23 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.set_theta_requires_grad(True)
         self.set_mask_requires_grad(False)
 
+    def _validate_non_collider_triples(self):
+        variables = set(self.ncm.v)
+        for triple in self.mask_non_collider_triples:
+            if len(triple) != 3:
+                raise ValueError("non-collider triple must contain exactly three variables")
+            missing = set(triple).difference(variables)
+            if missing:
+                raise ValueError("unknown non-collider variable(s): {}".format(sorted(missing)))
+
+    def mask_non_collider_penalty(self):
+        mask = self.get_mask()
+        penalty = mask.new_tensor(0.0)
+        v2i = {v: i for i, v in enumerate(self.ncm.v)}
+        for x, y, z in self.mask_non_collider_triples:
+            penalty = penalty + mask[v2i[x], v2i[y]] * mask[v2i[z], v2i[y]]
+        return penalty
+
     def _compute_structure_terms(self):
         cycle_loss = 0.0
         dag_h = 0.0
@@ -186,6 +208,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         mask_l1_loss = self.mask_l1_lambda * mask_l1
         mask_binary = self.mask_binary_penalty()
         mask_binary_loss = self.mask_binary_lambda * mask_binary
+        mask_non_collider = self.mask_non_collider_penalty()
+        mask_non_collider_loss = self.mask_non_collider_lambda * mask_non_collider
         if self.dag_alm:
             dag_h = self.notears_dag_penalty()
             alpha = self.alm_alpha.to(device=dag_h.device, dtype=dag_h.dtype)
@@ -196,7 +220,9 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
                 penalty_type=self.cycle_penalty_type,
                 dagma_s=self.dagma_s)
             cycle_loss = self.cycle_lambda * dag_h
-        return cycle_loss, dag_h, mask_l1, mask_l1_loss, mask_binary, mask_binary_loss
+        return (
+            cycle_loss, dag_h, mask_l1, mask_l1_loss, mask_binary,
+            mask_binary_loss, mask_non_collider, mask_non_collider_loss)
 
     def _current_phase(self):
         if self.theta_only_phase:
@@ -261,7 +287,10 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         active_opt.zero_grad()
         mmd_loss = self._compute_fit_loss(batch)
         max_reg = self._query_reg_weight()
-        cycle_loss, dag_h, mask_l1, mask_l1_loss, mask_binary, mask_binary_loss = self._compute_structure_terms()
+        (
+            cycle_loss, dag_h, mask_l1, mask_l1_loss, mask_binary,
+            mask_binary_loss, mask_non_collider,
+            mask_non_collider_loss) = self._compute_structure_terms()
 
         q_loss = 0.0
         if self.max_query is not None:
@@ -270,7 +299,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
                 q_loss = max_reg * query_objective
 
         objective_loss = mmd_loss + q_loss
-        structure_loss = cycle_loss + mask_l1_loss + mask_binary_loss
+        structure_loss = (
+            cycle_loss + mask_l1_loss + mask_binary_loss + mask_non_collider_loss)
         if phase == "mask":
             loss = objective_loss + structure_loss
         else:
@@ -286,6 +316,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         mask_l1_loss_val = mask_l1_loss.item()
         mask_binary_val = mask_binary.item()
         mask_binary_loss_val = mask_binary_loss.item()
+        mask_non_collider_val = mask_non_collider.item()
+        mask_non_collider_loss_val = mask_non_collider_loss.item()
         q_loss_val = q_loss.item() if T.is_tensor(q_loss) else q_loss
         objective_loss_val = objective_loss.item()
         structure_loss_val = structure_loss.item() if T.is_tensor(structure_loss) else structure_loss
@@ -320,6 +352,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.log("mask_l1_loss", mask_l1_loss_val, prog_bar=True)
         self.log("mask_binary", mask_binary_val, prog_bar=True)
         self.log("mask_binary_loss", mask_binary_loss_val, prog_bar=True)
+        self.log("mask_non_collider", mask_non_collider_val, prog_bar=True)
+        self.log("mask_non_collider_loss", mask_non_collider_loss_val, prog_bar=True)
         self.log("Q_loss", q_loss_val, prog_bar=True)
         if self.log_grad_norms:
             self.log("mask_fit_grad_norm", mask_fit_grad_norm, prog_bar=False)

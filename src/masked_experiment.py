@@ -115,6 +115,9 @@ parser.add_argument("--theta-only-extra-epochs", type=int, default=0,
                     help="after min-max training, freeze learned masks and train theta only for this many extra epochs")
 parser.add_argument("--theta-only-extra-lr", type=float, default=None,
                     help="theta learning rate for --theta-only-extra-epochs; defaults to --theta-lr/--lr")
+parser.add_argument("--no-theta-only-final-query-reg", dest="theta_only_final_query_reg",
+                    action="store_false", default=True,
+                    help="do not include the query regularizer during theta-only extra epochs")
 parser.add_argument("--reuse-data-from",
                     help="path to one generated dataset directory or dat.th file to reuse")
 parser.add_argument("--reuse-data-root",
@@ -165,6 +168,10 @@ parser.add_argument('--mask-l1-lambda', type=float, default=1.0,
                     help="weight on L1 regularization of realized mask entries; set to 0 to disable")
 parser.add_argument('--mask-binary-lambda', type=float, default=0.0,
                     help="weight on regularization that pushes realized mask entries away from 0.5")
+parser.add_argument('--mask-non-collider', action='append', default=[],
+                    help="triple X,Y,Z for which X->Y<-Z is penalized; may be repeated")
+parser.add_argument('--mask-non-collider-lambda', type=float, default=0.1,
+                    help="weight on non-collider regularization")
 parser.add_argument('--dag-alm', action="store_true",
                     help="use a simplified augmented Lagrangian for the NOTEARS acyclicity constraint")
 parser.add_argument('--alm-alpha-init', type=float, default=0.0,
@@ -224,6 +231,17 @@ def _parse_fixed_zero_edges(specs):
 
 def _parse_fixed_one_edges(specs):
     return _parse_fixed_edges(specs, "fixed-one")
+
+
+def _parse_non_collider_triples(specs):
+    triples = []
+    for spec in specs:
+        parts = [part.strip() for part in spec.split(",")]
+        if len(parts) != 3 or any(not part for part in parts):
+            raise ValueError(
+                "non-collider triple '{}' must have form X,Y,Z".format(spec))
+        triples.append(tuple(parts))
+    return triples
 
 
 def _build_bound_queries(graph_name, treatment_var, treatment_value, outcome_var, outcome_value):
@@ -345,6 +363,7 @@ def main():
     assert args.alm_update_every > 0
     assert 0 < args.alm_improve_ratio <= 1.0
     assert not args.dag_alm or args.cycle_penalty == "notears"
+    assert args.mask_non_collider_lambda >= 0
 
     pipeline = MaskedDivergencePipeline
     dat_model = valid_generators[gen_choice]
@@ -398,6 +417,8 @@ def main():
         'dagma-s': args.dagma_s,
         'mask-l1-lambda': args.mask_l1_lambda,
         'mask-binary-lambda': args.mask_binary_lambda,
+        'mask-non-collider-triples': _parse_non_collider_triples(args.mask_non_collider),
+        'mask-non-collider-lambda': args.mask_non_collider_lambda,
         'dag-alm': args.dag_alm,
         'alm-alpha-init': args.alm_alpha_init,
         'alm-rho-init': args.alm_rho_init,
@@ -420,7 +441,7 @@ def main():
     }
     if args.theta_only_extra_epochs > 0:
         hyperparams['theta-only-extra-epochs'] = args.theta_only_extra_epochs
-        hyperparams['theta-only-final-query-reg'] = True
+        hyperparams['theta-only-final-query-reg'] = args.theta_only_final_query_reg
         if args.theta_only_extra_lr is not None:
             hyperparams['theta-only-extra-lr'] = args.theta_only_extra_lr
 
