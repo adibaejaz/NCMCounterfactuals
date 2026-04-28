@@ -199,6 +199,66 @@ def _bound_diagnostics(dat_m, args):
     }
 
 
+def _adjustment_query_sets(graph_name):
+    if graph_name == "backdoor":
+        return (("Z",),)
+    if graph_name == "square":
+        return (("Z",), ("W",))
+    if graph_name == "four_clique":
+        return (("Z", "W"), ("Z",), ("W",))
+    return ()
+
+
+def _adjusted_metric_key(graph_name, adjustment_vars, do_name):
+    if graph_name == "backdoor":
+        return "true_adjusted_{}".format(do_name)
+    return "true_adjusted_{}_{}".format("_".join(adjustment_vars), do_name)
+
+
+def _adjustment_separation_diagnostics(bound_diagnostics, args):
+    adjustment_sets = _adjustment_query_sets(args.graph)
+    if not adjustment_sets:
+        return {
+            "enabled": False,
+            "passed": True,
+            "reason": "graph_has_no_adjustment_queries",
+        }
+
+    treatment_value = args.bound_treatment_value
+    outcome_event = {args.bound_outcome: args.bound_outcome_value}
+    do_name = serialize_probability(
+        outcome_event,
+        do_vals={args.bound_treatment: treatment_value})
+    conditional_key = "true_{}".format(serialize_probability(
+        outcome_event,
+        cond_vals={args.bound_treatment: treatment_value}))
+
+    metrics = bound_diagnostics["metrics"]
+    conditional = float(metrics[conditional_key])
+    comparisons = []
+    for adjustment_vars in adjustment_sets:
+        adjusted_key = _adjusted_metric_key(args.graph, adjustment_vars, do_name)
+        adjusted = float(metrics[adjusted_key])
+        comparisons.append({
+            "adjustment_vars": list(adjustment_vars),
+            "adjusted_key": adjusted_key,
+            "adjusted": adjusted,
+            "abs_diff_from_conditional": abs(adjusted - conditional),
+        })
+
+    max_diff = max(row["abs_diff_from_conditional"] for row in comparisons)
+    return {
+        "enabled": True,
+        "epsilon": float(args.adjustment_gap_min),
+        "query": do_name,
+        "conditional_key": conditional_key,
+        "conditional": conditional,
+        "max_abs_diff_from_conditional": max_diff,
+        "passed": bool(max_diff >= args.adjustment_gap_min),
+        "comparisons": comparisons,
+    }
+
+
 def _trial_directory(root, graph, n, dim, trial_index):
     return os.path.join(
         root,
@@ -225,7 +285,8 @@ def _save_accepted(
         hyperparams,
         metadata,
         bound_diagnostics,
-        positivity_diagnostics):
+        positivity_diagnostics,
+        adjustment_diagnostics):
     os.makedirs(out_dir, exist_ok=True)
     T.save(dat_sets, os.path.join(out_dir, "dat.th"))
     T.save(dat_sets, os.path.join(out_dir, "{}_dat.th".format(graph)))
@@ -238,6 +299,10 @@ def _save_accepted(
     _write_json(os.path.join(out_dir, "{}_ground_truth_bounds.json".format(graph)), bound_diagnostics)
     _write_json(os.path.join(out_dir, "positivity_diagnostics.json"), positivity_diagnostics)
     _write_json(os.path.join(out_dir, "{}_positivity_diagnostics.json".format(graph)), positivity_diagnostics)
+    _write_json(os.path.join(out_dir, "adjustment_separation_diagnostics.json"), adjustment_diagnostics)
+    _write_json(
+        os.path.join(out_dir, "{}_adjustment_separation_diagnostics.json".format(graph)),
+        adjustment_diagnostics)
 
 
 def _candidate_seed(args, trial_index, retry_index, hyperparams, do_var_list):
@@ -289,6 +354,7 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
             do_var_list=do_var_list,
             seed=seed)
         bound = _bound_diagnostics(dat_m, args)
+        adjustment = _adjustment_separation_diagnostics(bound, args)
         positivity = _joint_positivity_diagnostics(
             dat_m=dat_m,
             dat_sets=dat_sets,
@@ -301,6 +367,8 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
         reject_reasons = []
         if not bound["passed"]:
             reject_reasons.append("bound_gap")
+        if not adjustment["passed"]:
+            reject_reasons.append("adjustment_separation")
         if not positivity["passed"]:
             reject_reasons.append("positivity")
 
@@ -317,6 +385,7 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
             "accepted": len(reject_reasons) == 0,
             "reject_reasons": reject_reasons,
             "bound_gap_min": float(args.bound_gap_min),
+            "adjustment_gap_min": float(args.adjustment_gap_min),
             "positivity_epsilon": float(args.positivity_epsilon),
             "min_empirical_cell_count": int(args.min_empirical_cell_count),
         }
@@ -331,7 +400,8 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
                 hyperparams=hyperparams,
                 metadata=metadata,
                 bound_diagnostics=bound,
-                positivity_diagnostics=positivity)
+                positivity_diagnostics=positivity,
+                adjustment_diagnostics=adjustment)
             print("[accepted]", out_dir)
             return
 
@@ -340,6 +410,8 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
             "bound_gap": bound["gap"],
             "bound_lower": bound["lower"],
             "bound_upper": bound["upper"],
+            "adjustment_max_abs_diff_from_conditional": adjustment.get(
+                "max_abs_diff_from_conditional"),
             "min_true_joint_probability": positivity["min_true_joint_probability"],
             "min_empirical_joint_count": positivity["min_empirical_joint_count"],
         })
@@ -373,6 +445,8 @@ def build_parser():
     parser.add_argument("--bound-outcome-value", type=int, default=1)
     parser.add_argument("--bound-gap-min", type=float, default=0.1)
     parser.add_argument("--bound-mc-samples", type=int, default=1000000)
+    parser.add_argument("--adjustment-gap-min", type=float, default=0.1,
+                        help="minimum absolute gap between P(y|x) and at least one adjustment query")
 
     parser.add_argument("--positivity-epsilon", type=float, default=None,
                         help="minimum true joint cell probability; defaults to 0.01 for <=3 nodes and 0.005 otherwise")
@@ -406,6 +480,7 @@ def main():
         "do-var-list": do_var_list,
         "positivity": True,
         "bound-gap-min": args.bound_gap_min,
+        "adjustment-gap-min": args.adjustment_gap_min,
         "positivity-epsilon": args.positivity_epsilon,
         "min-empirical-cell-count": args.min_empirical_cell_count,
         "bound-treatment": args.bound_treatment,
