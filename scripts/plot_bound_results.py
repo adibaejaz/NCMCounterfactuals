@@ -49,6 +49,13 @@ def _extract_trial_index(run_dir):
     return "?"
 
 
+def _extract_graph(run_dir):
+    for piece in run_dir.split("-"):
+        if piece.startswith("graph="):
+            return piece[len("graph="):]
+    return "?"
+
+
 def _load_hyperparams(results_path):
     run_path = results_path.parent
     if run_path.name.isdigit():
@@ -156,6 +163,7 @@ def _matches_schedule_filter(row, schedule_filter):
 def _filter_rows(
         rows,
         include_nonstandard=False,
+        graph_names=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -169,6 +177,8 @@ def _filter_rows(
 
     narrowed = []
     for row in filtered:
+        if not _matches_any(row["graph"], graph_names):
+            continue
         if not _matches_any(row["train_seed_offset"], train_seed_offsets):
             continue
         if theta_lr is not None and row["theta_lr"] != theta_lr:
@@ -188,6 +198,7 @@ def _filter_rows(
 
 
 def _filter_label(
+        graph_names=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -195,6 +206,8 @@ def _filter_label(
         mask_steps_per_theta=None,
         schedule_filters=None):
     filters = []
+    if graph_names:
+        filters.append(f"graph={','.join(str(graph) for graph in graph_names)}")
     if train_seed_offsets:
         filters.append(f"seed={','.join(str(offset) for offset in train_seed_offsets)}")
     if theta_lr is not None:
@@ -303,9 +316,9 @@ def _extract_bound_series(results):
             true_lower = value
         elif key.startswith("true_upper_"):
             true_upper = value
-        elif key.startswith("min_ncm_"):
+        elif key.startswith("min_ncm_") or key.startswith("enum_min_ncm_"):
             ncm_min = value
-        elif key.startswith("max_ncm_"):
+        elif key.startswith("max_ncm_") or key.startswith("enum_max_ncm_"):
             ncm_max = value
 
     if None in (true_lower, true_upper, ncm_min, ncm_max):
@@ -324,7 +337,11 @@ def _extract_bound_error_series(results):
     err_upper = None
 
     for key, value in results.items():
-        if key.startswith("err_min_ncm_") and key.endswith("_lower_bound"):
+        if key.startswith("enum_min_err_ncm_"):
+            err_lower = value
+        elif key.startswith("enum_max_err_ncm_"):
+            err_upper = value
+        elif key.startswith("err_min_ncm_") and key.endswith("_lower_bound"):
             err_lower = value
         elif key.startswith("err_max_ncm_") and key.endswith("_upper_bound"):
             err_upper = value
@@ -343,16 +360,24 @@ def _extract_bound_error_series(results):
 
 
 def _extract_kl_series(results):
-    keys = [
-        "min_total_true_KL",
-        "max_total_true_KL",
-        "min_total_dat_KL",
-        "max_total_dat_KL",
-    ]
-    if any(key not in results for key in keys):
-        return None
+    standard_keys = {
+        "min_total_true_KL": "min_total_true_KL",
+        "max_total_true_KL": "max_total_true_KL",
+        "min_total_dat_KL": "min_total_dat_KL",
+        "max_total_dat_KL": "max_total_dat_KL",
+    }
+    enum_keys = {
+        "enum_min_total_true_KL": "min_total_true_KL",
+        "enum_max_total_true_KL": "max_total_true_KL",
+        "enum_min_total_dat_KL": "min_total_dat_KL",
+        "enum_max_total_dat_KL": "max_total_dat_KL",
+    }
 
-    return {key: float(results[key]) for key in keys}
+    if all(key in results for key in standard_keys):
+        return {alias: float(results[key]) for key, alias in standard_keys.items()}
+    if all(key in results for key in enum_keys):
+        return {alias: float(results[key]) for key, alias in enum_keys.items()}
+    return None
 
 
 def load_bound_results(root_dir):
@@ -374,6 +399,7 @@ def load_bound_results(root_dir):
         rows.append({
             "label": _extract_run_label(results_path, root),
             "run_id": _extract_run_id(run_dir),
+            "graph": _extract_graph(run_dir),
             "trial_index": _extract_trial_index(run_dir),
             "cycle_lambda": _as_float(hyperparams.get("cycle-lambda")),
             "max_lambda": _as_float(hyperparams.get("max-lambda")),
@@ -404,6 +430,7 @@ def plot_bound_results(
         title=None,
         figsize=None,
         include_nonstandard=False,
+        graph_names=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -413,6 +440,7 @@ def plot_bound_results(
     rows = _filter_rows(
         load_bound_results(root_dir),
         include_nonstandard=include_nonstandard,
+        graph_names=graph_names,
         train_seed_offsets=train_seed_offsets,
         theta_lr=theta_lr,
         mask_lr=mask_lr,
@@ -491,6 +519,7 @@ def plot_bound_results(
     ax.set_xlabel("Cycle lambda / mask mode, grouped by trial", labelpad=X_LABEL_PAD)
     ax.set_ylabel("Query value")
     filter_label = _filter_label(
+        graph_names=graph_names,
         train_seed_offsets=train_seed_offsets,
         theta_lr=theta_lr,
         mask_lr=mask_lr,
@@ -530,6 +559,7 @@ def plot_kl_results(
         title=None,
         figsize=None,
         include_nonstandard=False,
+        graph_names=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -540,6 +570,7 @@ def plot_kl_results(
         row for row in _filter_rows(
             load_bound_results(root_dir),
             include_nonstandard=include_nonstandard,
+            graph_names=graph_names,
             train_seed_offsets=train_seed_offsets,
             theta_lr=theta_lr,
             mask_lr=mask_lr,
@@ -627,6 +658,7 @@ def plot_kl_results(
         ax.grid(axis="y", alpha=0.3, zorder=1)
 
     filter_label = _filter_label(
+        graph_names=graph_names,
         train_seed_offsets=train_seed_offsets,
         theta_lr=theta_lr,
         mask_lr=mask_lr,
@@ -697,9 +729,15 @@ def _parse_schedule_filter(value):
         ) from exc
 
 
+def _path_with_graph(path, graph):
+    path = Path(path)
+    return str(path.with_name(f"{path.stem}_{graph}{path.suffix}"))
+
+
 def _print_summary_table(
         root_dir,
         include_nonstandard=False,
+        graph_names=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -710,6 +748,7 @@ def _print_summary_table(
         row for row in _filter_rows(
             load_bound_results(root_dir),
             include_nonstandard=include_nonstandard,
+            graph_names=graph_names,
             train_seed_offsets=train_seed_offsets,
             theta_lr=theta_lr,
             mask_lr=mask_lr,
@@ -803,6 +842,7 @@ def _print_summary_table(
 def _summary_metric_rows(
         root_dir,
         include_nonstandard=False,
+        graph_names=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -813,6 +853,7 @@ def _summary_metric_rows(
         row for row in _filter_rows(
             load_bound_results(root_dir),
             include_nonstandard=include_nonstandard,
+            graph_names=graph_names,
             train_seed_offsets=train_seed_offsets,
             theta_lr=theta_lr,
             mask_lr=mask_lr,
@@ -863,6 +904,7 @@ def plot_summary_stats(
         title=None,
         figsize=None,
         include_nonstandard=False,
+        graph_names=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -872,6 +914,7 @@ def plot_summary_stats(
     metric_rows = _summary_metric_rows(
         root_dir,
         include_nonstandard=include_nonstandard,
+        graph_names=graph_names,
         train_seed_offsets=train_seed_offsets,
         theta_lr=theta_lr,
         mask_lr=mask_lr,
@@ -941,6 +984,7 @@ def plot_summary_stats(
     axes[-1].set_xticks(xs)
     axes[-1].set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
     filter_label = _filter_label(
+        graph_names=graph_names,
         train_seed_offsets=train_seed_offsets,
         theta_lr=theta_lr,
         mask_lr=mask_lr,
@@ -967,6 +1011,17 @@ def main():
     parser.add_argument("--summary-output", help="Defaults to <root_dir>/bound_summary_stats.png")
     parser.add_argument("--summary-title", help="Optional aggregate summary plot title")
     parser.add_argument("--no-table", action="store_true", help="Do not print grouped KL/bound-error summary table")
+    parser.add_argument(
+        "--graph",
+        action="append",
+        dest="graph_names",
+        help="Filter by graph name. May be repeated.",
+    )
+    parser.add_argument(
+        "--per-graph",
+        action="store_true",
+        help="Write separate bound, KL, and summary plots for each graph under the root.",
+    )
     parser.add_argument(
         "--include-nonstandard",
         action="store_true",
@@ -997,46 +1052,31 @@ def main():
     output = args.output or str(Path(args.root_dir) / "bound_results.png")
     kl_output = args.kl_output or str(Path(args.root_dir) / "bound_kl_results.png")
     summary_output = args.summary_output or str(Path(args.root_dir) / "bound_summary_stats.png")
-    plot_bound_results(
-        args.root_dir,
-        output_path=output,
-        title=args.title,
-        include_nonstandard=args.include_nonstandard,
-        train_seed_offsets=args.train_seed_offsets,
-        theta_lr=args.theta_lr,
-        mask_lr=args.mask_lr,
-        theta_steps_per_mask=args.theta_steps_per_mask,
-        mask_steps_per_theta=args.mask_steps_per_theta,
-        schedule_filters=args.schedule_filters,
-    )
-    plot_kl_results(
-        args.root_dir,
-        output_path=kl_output,
-        title=args.kl_title,
-        include_nonstandard=args.include_nonstandard,
-        train_seed_offsets=args.train_seed_offsets,
-        theta_lr=args.theta_lr,
-        mask_lr=args.mask_lr,
-        theta_steps_per_mask=args.theta_steps_per_mask,
-        mask_steps_per_theta=args.mask_steps_per_theta,
-        schedule_filters=args.schedule_filters,
-    )
-    plot_summary_stats(
-        args.root_dir,
-        output_path=summary_output,
-        title=args.summary_title,
-        include_nonstandard=args.include_nonstandard,
-        train_seed_offsets=args.train_seed_offsets,
-        theta_lr=args.theta_lr,
-        mask_lr=args.mask_lr,
-        theta_steps_per_mask=args.theta_steps_per_mask,
-        mask_steps_per_theta=args.mask_steps_per_theta,
-        schedule_filters=args.schedule_filters,
-    )
-    if not args.no_table:
-        _print_summary_table(
+
+    graph_groups = [args.graph_names]
+    if args.per_graph:
+        rows = load_bound_results(args.root_dir)
+        available_graphs = sorted({
+            row["graph"] for row in rows
+            if _matches_any(row["graph"], args.graph_names)
+        })
+        if not available_graphs:
+            raise ValueError(f"No completed bound results found under {args.root_dir}")
+        graph_groups = [[graph] for graph in available_graphs]
+
+    saved_paths = []
+    for graph_names in graph_groups:
+        graph_suffix = graph_names[0] if args.per_graph and graph_names else None
+        cur_output = _path_with_graph(output, graph_suffix) if graph_suffix else output
+        cur_kl_output = _path_with_graph(kl_output, graph_suffix) if graph_suffix else kl_output
+        cur_summary_output = _path_with_graph(summary_output, graph_suffix) if graph_suffix else summary_output
+
+        plot_bound_results(
             args.root_dir,
+            output_path=cur_output,
+            title=args.title,
             include_nonstandard=args.include_nonstandard,
+            graph_names=graph_names,
             train_seed_offsets=args.train_seed_offsets,
             theta_lr=args.theta_lr,
             mask_lr=args.mask_lr,
@@ -1044,9 +1084,48 @@ def main():
             mask_steps_per_theta=args.mask_steps_per_theta,
             schedule_filters=args.schedule_filters,
         )
-    print(f"Saved plot to {output}")
-    print(f"Saved KL plot to {kl_output}")
-    print(f"Saved summary stats plot to {summary_output}")
+        plot_kl_results(
+            args.root_dir,
+            output_path=cur_kl_output,
+            title=args.kl_title,
+            include_nonstandard=args.include_nonstandard,
+            graph_names=graph_names,
+            train_seed_offsets=args.train_seed_offsets,
+            theta_lr=args.theta_lr,
+            mask_lr=args.mask_lr,
+            theta_steps_per_mask=args.theta_steps_per_mask,
+            mask_steps_per_theta=args.mask_steps_per_theta,
+            schedule_filters=args.schedule_filters,
+        )
+        plot_summary_stats(
+            args.root_dir,
+            output_path=cur_summary_output,
+            title=args.summary_title,
+            include_nonstandard=args.include_nonstandard,
+            graph_names=graph_names,
+            train_seed_offsets=args.train_seed_offsets,
+            theta_lr=args.theta_lr,
+            mask_lr=args.mask_lr,
+            theta_steps_per_mask=args.theta_steps_per_mask,
+            mask_steps_per_theta=args.mask_steps_per_theta,
+            schedule_filters=args.schedule_filters,
+        )
+        if not args.no_table:
+            _print_summary_table(
+                args.root_dir,
+                include_nonstandard=args.include_nonstandard,
+                graph_names=graph_names,
+                train_seed_offsets=args.train_seed_offsets,
+                theta_lr=args.theta_lr,
+                mask_lr=args.mask_lr,
+                theta_steps_per_mask=args.theta_steps_per_mask,
+                mask_steps_per_theta=args.mask_steps_per_theta,
+                schedule_filters=args.schedule_filters,
+            )
+        saved_paths.extend([cur_output, cur_kl_output, cur_summary_output])
+
+    for path in saved_paths:
+        print(f"Saved plot to {path}")
 
 
 if __name__ == "__main__":

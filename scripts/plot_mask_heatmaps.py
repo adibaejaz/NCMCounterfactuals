@@ -40,6 +40,13 @@ def _extract_trial_index(run_dir):
     return "?"
 
 
+def _extract_graph(run_dir):
+    for piece in run_dir.name.split("-"):
+        if piece.startswith("graph="):
+            return piece[len("graph="):]
+    return "?"
+
+
 def _load_json(path):
     with open(path) as f:
         return json.load(f)
@@ -137,6 +144,7 @@ def load_mask_rows(root_dir, include_nonstandard=False):
         rows.append({
             "run_id": _extract_run_id(run_dir),
             "trial_index": _extract_trial_index(run_dir),
+            "graph": _extract_graph(run_dir),
             "cycle_lambda": _as_float(hyperparams.get("cycle-lambda")),
             "mask_mode": hyperparams.get("mask-mode", "?"),
             "train_seed_offset": hyperparams.get("train-seed-offset", "0"),
@@ -171,6 +179,7 @@ def load_mask_rows(root_dir, include_nonstandard=False):
 
 def _filter_rows(
         rows,
+        graph_names=None,
         mask_mode=None,
         cycle_lambda=None,
         trial=None,
@@ -182,7 +191,10 @@ def _filter_rows(
         mask_steps_per_theta=None,
         schedule_filters=None):
     filtered = []
+    accepted_graphs = _filter_values(graph_names)
     for row in rows:
+        if accepted_graphs is not None and str(row["graph"]) not in accepted_graphs:
+            continue
         if mask_mode is not None and row["mask_mode"] != mask_mode:
             continue
         if cycle_lambda is not None and row["cycle_lambda"] != cycle_lambda:
@@ -214,6 +226,7 @@ def _filter_rows(
 
 def _select_mask_rows(
         root_dir,
+        graph_names=None,
         mask_mode=None,
         cycle_lambda=None,
         trial=None,
@@ -228,6 +241,7 @@ def _select_mask_rows(
     rows = load_mask_rows(root_dir, include_nonstandard=include_nonstandard)
     return _filter_rows(
         rows,
+        graph_names=graph_names,
         mask_mode=mask_mode,
         cycle_lambda=cycle_lambda,
         trial=trial,
@@ -260,6 +274,7 @@ def plot_mask_heatmaps(
         root_dir,
         output_path=None,
         rows=None,
+        graph_names=None,
         mask_mode=None,
         cycle_lambda=None,
         trial=None,
@@ -276,6 +291,7 @@ def plot_mask_heatmaps(
     if rows is None:
         rows = _select_mask_rows(
             root_dir,
+            graph_names=graph_names,
             mask_mode=mask_mode,
             cycle_lambda=cycle_lambda,
             trial=trial,
@@ -439,6 +455,7 @@ def plot_mask_heatmaps_by_trial(
             root_dir,
             output_path=trial_output,
             rows=trial_rows,
+            graph_names=graph_names,
             mask_mode=mask_mode,
             cycle_lambda=cycle_lambda,
             trial=trial,
@@ -462,6 +479,8 @@ def main():
     parser = argparse.ArgumentParser(description="Plot learned min/max mask heatmaps for bound runs.")
     parser.add_argument("root_dir", help="Root directory to search recursively for mask_min.json files")
     parser.add_argument("--output", help="Defaults to <root_dir>/mask_heatmaps.png")
+    parser.add_argument("--graph", action="append", dest="graph_names",
+                        help="Filter by graph name. May be repeated.")
     parser.add_argument("--mask-mode", help="Filter by mask mode, e.g. gate, multiply, st-gate")
     parser.add_argument("--cycle-lambda", type=float, help="Filter by cycle lambda")
     parser.add_argument("--trial", help="Filter by trial index")
@@ -490,6 +509,7 @@ def main():
     output = args.output or str(Path(args.root_dir) / "mask_heatmaps.png")
     rows = _select_mask_rows(
         args.root_dir,
+        graph_names=args.graph_names,
         mask_mode=args.mask_mode,
         cycle_lambda=args.cycle_lambda,
         trial=args.trial,
@@ -513,6 +533,7 @@ def main():
                 args.root_dir,
                 output_path=trial_output,
                 rows=trial_rows,
+                graph_names=args.graph_names,
                 mask_mode=args.mask_mode,
                 cycle_lambda=args.cycle_lambda,
                 trial=trial,
@@ -537,6 +558,7 @@ def main():
             args.root_dir,
             output_path=output,
             rows=rows,
+            graph_names=args.graph_names,
             mask_mode=args.mask_mode,
             cycle_lambda=args.cycle_lambda,
             trial=args.trial,
