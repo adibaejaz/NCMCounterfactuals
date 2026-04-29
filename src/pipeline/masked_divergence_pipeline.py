@@ -109,6 +109,9 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.mc_sample_size = hyperparams.get("mc-sample-size", 10000)
         self.min_lambda = hyperparams.get("min-lambda", 0.001)
         self.max_lambda = hyperparams.get("max-lambda", 1.0)
+        self.query_update_target = hyperparams.get("query-update-target", "mask")
+        if self.query_update_target not in {"mask", "theta", "all"}:
+            raise ValueError("query-update-target must be one of: mask, theta, all")
         self.alt_opt = hyperparams.get("alt-opt", False)
         self.theta_steps_per_mask = hyperparams.get("theta-steps-per-mask", 5)
         self.mask_steps_per_theta = hyperparams.get("mask-steps-per-theta", 1)
@@ -250,6 +253,42 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             query_loss += cur_loss
         return query_loss
 
+    def _get_q_loss_with_theta_frozen(self):
+        theta_params = list(self.theta_parameters())
+        theta_requires_grad = [param.requires_grad for param in theta_params]
+        for param in theta_params:
+            param.requires_grad_(False)
+        try:
+            return self._get_q_loss()
+        finally:
+            for param, requires_grad in zip(theta_params, theta_requires_grad):
+                param.requires_grad_(requires_grad)
+
+    def _get_q_loss_with_mask_frozen(self):
+        mask_params = list(self.mask_parameters())
+        mask_requires_grad = [param.requires_grad for param in mask_params]
+        for param in mask_params:
+            param.requires_grad_(False)
+        try:
+            return self._get_q_loss()
+        finally:
+            for param, requires_grad in zip(mask_params, mask_requires_grad):
+                param.requires_grad_(requires_grad)
+
+    def _query_loss_enabled_for_phase(self, phase):
+        if self.max_query is None:
+            return False
+        if self.theta_only_phase and not self.final_query_reg:
+            return False
+        return self.query_update_target == "all" or self.query_update_target == phase
+
+    def _get_phase_q_loss(self, phase):
+        if self.query_update_target == "mask" and phase == "joint":
+            return self._get_q_loss_with_theta_frozen()
+        if self.query_update_target == "theta" and phase == "joint":
+            return self._get_q_loss_with_mask_frozen()
+        return self._get_q_loss()
+
 
     def on_train_epoch_start(self):
         self._alm_h_sum = 0.0
@@ -284,8 +323,6 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         else:
             active_opt = self.optimizers()
 
-        active_opt.zero_grad()
-        mmd_loss = self._compute_fit_loss(batch)
         max_reg = self._query_reg_weight()
         (
             cycle_loss, dag_h, mask_l1, mask_l1_loss, mask_binary,
@@ -293,11 +330,13 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             mask_non_collider_loss) = self._compute_structure_terms()
 
         q_loss = 0.0
-        if self.max_query is not None:
-            query_objective = self._get_q_loss()
+        if self._query_loss_enabled_for_phase(phase):
+            query_objective = self._get_phase_q_loss(phase)
             if not T.isnan(query_objective):
                 q_loss = max_reg * query_objective
 
+        active_opt.zero_grad()
+        mmd_loss = self._compute_fit_loss(batch)
         objective_loss = mmd_loss + q_loss
         structure_loss = (
             cycle_loss + mask_l1_loss + mask_binary_loss + mask_non_collider_loss)

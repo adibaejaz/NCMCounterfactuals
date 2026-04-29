@@ -209,11 +209,11 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                         early_stop_patience = int(hyperparams.get('early-stop-patience', 100))
                         early_stop_min_delta = float(hyperparams.get('early-stop-min-delta', 1e-6))
                         trainer_max, checkpoint_max = self.create_trainer(
-                            d, hyperparams.get('max-query-iters', 3000), r, gpu,
+                            d, hyperparams.get('max-query-iters', 3000), r, gpu, phase='max',
                             early_stop_patience=early_stop_patience,
                             early_stop_min_delta=early_stop_min_delta)
                         trainer_min, checkpoint_min = self.create_trainer(
-                            d, hyperparams.get('max-query-iters', 3000), r, gpu,
+                            d, hyperparams.get('max-query-iters', 3000), r, gpu, phase='min',
                             early_stop_patience=early_stop_patience,
                             early_stop_min_delta=early_stop_min_delta)
 

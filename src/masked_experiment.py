@@ -111,6 +111,8 @@ parser.add_argument("--early-stop-min-delta", type=float, default=1e-6,
 parser.add_argument("--max-lambda", type=float, default=1.0, help="initial query regularization weight")
 parser.add_argument("--min-lambda", type=float, default=0.001, help="final query regularization weight")
 parser.add_argument("--mc-sample-size", type=int, default=10000, help="sample size for query optimization")
+parser.add_argument("--query-update-target", choices=["mask", "theta", "all"], default="mask",
+                    help="which parameter block receives query-loss gradients during alternating optimization")
 parser.add_argument("--theta-only-extra-epochs", type=int, default=0,
                     help="after min-max training, freeze learned masks and train theta only for this many extra epochs")
 parser.add_argument("--theta-only-extra-lr", type=float, default=None,
@@ -438,6 +440,7 @@ def main():
         'max-lambda': args.max_lambda,
         'min-lambda': args.min_lambda,
         'mc-sample-size': args.mc_sample_size,
+        'query-update-target': args.query_update_target,
     }
     if args.theta_only_extra_epochs > 0:
         hyperparams['theta-only-extra-epochs'] = args.theta_only_extra_epochs
