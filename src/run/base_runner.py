@@ -6,6 +6,9 @@ from tempfile import NamedTemporaryFile
 from contextlib import contextmanager
 
 
+RUNTIME_ONLY_HYPERPARAMS = {"num-workers"}
+
+
 def _stable_jsonable(value):
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -86,7 +89,11 @@ class BaseRunner:
     def _stable_hyperparams_payload(self, hyperparams=None):
         if hyperparams is None:
             hyperparams = dict()
-        return json.dumps(_stable_jsonable(hyperparams), sort_keys=True)
+        stable_hyperparams = {
+            k: v for k, v in hyperparams.items()
+            if k not in RUNTIME_ONLY_HYPERPARAMS
+        }
+        return json.dumps(_stable_jsonable(stable_hyperparams), sort_keys=True)
 
     def get_run_key(self, cg_file, n, dim, trial_index, hyperparams=None):
         data_key = self.get_key(cg_file, n, dim, trial_index)

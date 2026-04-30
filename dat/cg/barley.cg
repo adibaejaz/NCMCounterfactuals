@@ -1,52 +1,52 @@
 <NODES>
-jordtype  -750,-150
-komm  -722,-600
-nedbarea  -694,-450
-nmin  -694,-300
-aar_mod  -750,0
-forfrugt  -525,-450
-potnmin  -600,0
-jordn  -600,-150
-pesticid  -412,-600
-exptgens  -450,0
-mod_nmin  -450,-150
-ngodnt  -544,-300
-nopt  -375,-300
-ngodnn  -300,-150
-ngodn  -300,0
-nprot  -150,-150
-saatid  0,-300
-rokap  -150,0
-dgv1059  -750,150
-sort  -600,150
-srtprot  -450,150
-nplac  0,0
-dg25  150,0
-ngtilg  -300,150
-ntilg  0,-150
-saamng  300,0
-tkvs  450,0
-saakern  -150,150
-partigerm  600,0
-frspdag  750,-150
-jordinf  750,0
-markgrm  0,150
-antplnt  -750,300
-sorttkv  -600,300
-aks_m2  -450,300
-keraks  -300,300
-dgv5980  150,150
-aks_vgt  -150,300
-srtsize  0,300
-ksort  300,150
-protein  150,300
-udb  -300,600
-spndx  300,300
-tkv  450,300
-slt22  -450,450
-s2225  -300,450
-s2528  -150,450
-bgbyg  600,300
+jordtype
+komm
+nedbarea
+nmin
+aar_mod
+forfrugt
+potnmin
+jordn
+pesticid
+exptgens
+mod_nmin
+ngodnt
+nopt
+ngodnn
+ngodn
+nprot
+saatid
+rokap
+dgv1059
+sort
+srtprot
+nplac
+dg25
+ngtilg
+ntilg
+saamng
+tkvs
+saakern
+partigerm
+frspdag
+jordinf
+markgrm
+antplnt
+sorttkv
+aks_m2
+keraks
+dgv5980
+aks_vgt
+srtsize
+ksort
+protein
+udb
+spndx
+tkv
+slt22
+s2225
+s2528
+bgbyg
 
 <EDGES>
 jordtype -> nmin

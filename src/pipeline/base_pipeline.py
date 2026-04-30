@@ -8,7 +8,7 @@ class BasePipeline(pl.LightningModule):
     patience = 20
     max_epochs = 10000
 
-    def __init__(self, generator, do_var_list, dat_sets, cg, dim, ncm, batch_size=256):
+    def __init__(self, generator, do_var_list, dat_sets, cg, dim, ncm, batch_size=256, num_workers=0):
         super().__init__()
         self.generator = generator
         self.do_var_list = do_var_list
@@ -18,6 +18,7 @@ class BasePipeline(pl.LightningModule):
         self.dim = dim
 
         self.batch_size = batch_size
+        self.num_workers = num_workers
 
         self.stored_metrics = None
 
@@ -26,7 +27,9 @@ class BasePipeline(pl.LightningModule):
 
     def train_dataloader(self):
         return DataLoader(SCMDataset(self.dat_sets),
-            batch_size=self.batch_size, shuffle=True, drop_last=True)
+            batch_size=self.batch_size, shuffle=True, drop_last=True,
+            num_workers=self.num_workers,
+            persistent_workers=self.num_workers > 0)
 
     def update_metrics(self, new_metrics):
         self.stored_metrics = new_metrics

@@ -96,6 +96,7 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             mask_init_value=hyperparams.get('mask-init-value', 0.5),
             mask_init_range=hyperparams.get('mask-init-range', (0.25, 0.75)),
             use_dag_updates=hyperparams.get('use-dag-updates', DEFAULT_USE_DAG_UPDATES),
+            num_workers=hyperparams.get('num-workers', 0),
         )
 
         if isinstance(max_query, CTF):

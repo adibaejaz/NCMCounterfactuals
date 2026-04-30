@@ -32,8 +32,11 @@ class MaskedBasePipeline(BasePipeline):
             mask_init_mode="constant",
             mask_init_value=0.5,
             mask_init_range=(0.25, 0.75),
-            use_dag_updates=DEFAULT_USE_DAG_UPDATES):
-        super().__init__(generator, do_var_list, dat_sets, cg, dim, ncm, batch_size=batch_size)
+            use_dag_updates=DEFAULT_USE_DAG_UPDATES,
+            num_workers=0):
+        super().__init__(
+            generator, do_var_list, dat_sets, cg, dim, ncm,
+            batch_size=batch_size, num_workers=num_workers)
 
         self.fixed_zero_mask, self.fixed_one_mask = self._build_fixed_masks(
             fixed_zero_edges=fixed_zero_edges,

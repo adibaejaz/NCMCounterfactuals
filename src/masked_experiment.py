@@ -79,6 +79,8 @@ parser.add_argument('--mask-lr', type=float, default=None,
                     help="optimizer learning rate for mask parameters; defaults to --lr")
 parser.add_argument('--data-bs', type=int, default=1000, help="batch size of data (default: 1000)")
 parser.add_argument('--ncm-bs', type=int, default=1000, help="batch size of NCM samples (default: 1000)")
+parser.add_argument('--num-workers', type=int, default=0,
+                    help="number of DataLoader workers (default: 0)")
 parser.add_argument('--h-layers', type=int, default=2, help="number of hidden layers (default: 2)")
 parser.add_argument('--h-size', type=int, default=128, help="neural network hidden layer size (default: 128)")
 parser.add_argument('--u-size', type=int, default=1, help="dimensionality of U variables (default: 1)")
@@ -505,6 +507,7 @@ def main():
         'mask-lr': args.mask_lr if args.mask_lr is not None else args.lr,
         'data-bs': args.data_bs,
         'ncm-bs': args.ncm_bs,
+        'num-workers': args.num_workers,
         'h-layers': args.h_layers,
         'h-size': args.h_size,
         'u-size': args.u_size,

@@ -14,6 +14,7 @@ import glob
 import shutil
 import hashlib
 import json
+import time
 
 import numpy as np
 import torch as T
@@ -130,6 +131,7 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                     print('[done]', d)
                     return
 
+                run_start = time.perf_counter()
                 seed = int(hashlib.sha512(key.encode()).hexdigest(), 16) & 0xffffffff
 
                 if data_bundle is not None:
@@ -188,6 +190,7 @@ class MaskedNCMMinMaxRunner(BaseRunner):
 
                 if gpu is None:
                     gpu = int(T.cuda.is_available())
+                data_setup_wall_seconds = time.perf_counter() - run_start
                 stored_metrics = dict(data_bundle.stored_metrics) if data_bundle is not None else dict()
                 for r in range(hyperparams.get("id-reruns", 1)):
                     os.makedirs(f'{d}/{r}/', exist_ok=True)
@@ -201,6 +204,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                                 except FileNotFoundError:
                                     pass
 
+                        rerun_start = time.perf_counter()
+                        timings = {"data_setup_wall_seconds": data_setup_wall_seconds}
+
                         new_key = "{}-run={}".format(key, r)
                         seed = int(hashlib.sha512(new_key.encode()).hexdigest(), 16) & 0xffffffff
                         seed = (seed + int(hyperparams.get("train-seed-offset", 0))) & 0xffffffff
@@ -208,6 +214,7 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                         np.random.seed(seed)
                         print("Run {} seed: {}".format(r, seed))
 
+                        model_setup_start = time.perf_counter()
                         m_max = self.pipeline(dat_m, hyperparams["do-var-list"], dat_sets, cg, dim,
                                               hyperparams=hyperparams, ncm_model=self.ncm_model,
                                               max_query=hyperparams.get('max-query-1', None))
@@ -225,28 +232,39 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                             d, hyperparams.get('max-query-iters', 3000), r, gpu, phase='min',
                             early_stop_patience=early_stop_patience,
                             early_stop_min_delta=early_stop_min_delta)
+                        timings["model_setup_wall_seconds"] = time.perf_counter() - model_setup_start
 
                         print("\nTraining max model...")
+                        max_initial_eval_start = time.perf_counter()
                         stored_metrics = self.print_metrics(
                             m_max, hyperparams['do-var-list'], dat_sets,
                             verbose=verbose, stored_metrics=stored_metrics,
                             query_track=hyperparams["eval-query"],
                             query_bounds=hyperparams.get("query-bound-spec"))
+                        timings["max_initial_eval_wall_seconds"] = time.perf_counter() - max_initial_eval_start
+                        max_train_start = time.perf_counter()
                         trainer_max.fit(m_max)
                         ckpt_max = T.load(checkpoint_max.best_model_path)
                         m_max.load_state_dict(ckpt_max['state_dict'])
+                        timings["max_train_wall_seconds"] = time.perf_counter() - max_train_start
 
                         print("\nTraining min model...")
+                        min_initial_eval_start = time.perf_counter()
                         stored_metrics = self.print_metrics(
                             m_min, hyperparams['do-var-list'], dat_sets,
                             verbose=verbose, stored_metrics=stored_metrics,
                             query_track=hyperparams["eval-query"],
                             query_bounds=hyperparams.get("query-bound-spec"))
+                        timings["min_initial_eval_wall_seconds"] = time.perf_counter() - min_initial_eval_start
+                        min_train_start = time.perf_counter()
                         trainer_min.fit(m_min)
                         ckpt_min = T.load(checkpoint_min.best_model_path)
                         m_min.load_state_dict(ckpt_min['state_dict'])
+                        timings["min_train_wall_seconds"] = time.perf_counter() - min_train_start
 
                         theta_only_extra_epochs = int(hyperparams.get('theta-only-extra-epochs', 0))
+                        timings["theta_only_max_train_wall_seconds"] = 0.0
+                        timings["theta_only_min_train_wall_seconds"] = 0.0
                         if theta_only_extra_epochs > 0:
                             theta_only_extra_lr = hyperparams.get('theta-only-extra-lr', None)
 
@@ -258,10 +276,12 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                                 d, theta_only_extra_epochs, r, gpu, phase='theta_only_max',
                                 early_stop_patience=early_stop_patience,
                                 early_stop_min_delta=early_stop_min_delta)
+                            theta_only_max_train_start = time.perf_counter()
                             trainer_max_extra.fit(m_max)
                             if checkpoint_max_extra.best_model_path:
                                 ckpt_max = T.load(checkpoint_max_extra.best_model_path)
                                 m_max.load_state_dict(ckpt_max['state_dict'])
+                            timings["theta_only_max_train_wall_seconds"] = time.perf_counter() - theta_only_max_train_start
 
                             print("\nTraining min model theta-only extension...")
                             m_min.start_theta_only_phase(
@@ -271,17 +291,23 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                                 d, theta_only_extra_epochs, r, gpu, phase='theta_only_min',
                                 early_stop_patience=early_stop_patience,
                                 early_stop_min_delta=early_stop_min_delta)
+                            theta_only_min_train_start = time.perf_counter()
                             trainer_min_extra.fit(m_min)
                             if checkpoint_min_extra.best_model_path:
                                 ckpt_min = T.load(checkpoint_min_extra.best_model_path)
                                 m_min.load_state_dict(ckpt_min['state_dict'])
+                            timings["theta_only_min_train_wall_seconds"] = time.perf_counter() - theta_only_min_train_start
 
+                        final_eval_start = time.perf_counter()
                         results = evaluation.all_metrics_minmax(
                             m_max.generator, m_min.ncm, m_max.ncm, hyperparams["do-var-list"], dat_sets,
                             n=100000, stored=stored_metrics, query_track=hyperparams["eval-query"],
                             query_bounds=hyperparams.get("query-bound-spec"),
                             ncm_min_kwargs=self._ncm_kwargs(m_min),
                             ncm_max_kwargs=self._ncm_kwargs(m_max))
+                        timings["final_eval_wall_seconds"] = time.perf_counter() - final_eval_start
+                        timings["rerun_total_wall_seconds"] = time.perf_counter() - rerun_start
+                        results.update(timings)
                         print(results)
 
                         with open(f'{d}/{r}/results.json', 'w') as file:
