@@ -25,7 +25,13 @@ from src.ds.equivalence_class import read_equivalence_class
 from src.metric.queries import get_query, get_experimental_variables, is_q_id_in_G
 from src.pipeline import MaskedDivergencePipeline
 from src.run import MaskedNCMMinMaxRunner, MaskedNCMRunner
-from src.run.data_setup import DataBundle, _build_dat_model
+from src.run.data_setup import (
+    DataBundle,
+    _build_dat_model,
+    _build_v_sizes,
+    _parse_v_size_payload,
+    parse_var_dim_overrides,
+)
 from src.scm.ctm import CTM
 from src.scm.masked_scm import (
     DEFAULT_GATE_SHARPNESS,
@@ -136,6 +142,8 @@ parser.add_argument('--trial-index', action="append", type=int, default=[],
                     help="specific trial index to run; may be repeated. Overrides --n-trials when provided")
 parser.add_argument('--n-samples', '-n', type=int, default=10000, help="number of samples (default: 10000)")
 parser.add_argument('--dim', '-d', type=int, default=1, help="dimensionality of variables (default: 1)")
+parser.add_argument('--var-dim', action="append", default=[],
+                    help="per-variable dimension override formatted as VAR=DIM; may be repeated")
 parser.add_argument('--gpu', help="GPU to use")
 
 parser.add_argument('--mask-mode', default=DEFAULT_MASK_MODE,
@@ -395,12 +403,23 @@ def _coerce_generated_hyperparams(raw_hyperparams):
             hyperparams[key] = int(raw_hyperparams[key])
     if "c2-scale" in raw_hyperparams:
         hyperparams["c2-scale"] = float(raw_hyperparams["c2-scale"])
+    for key in ("v-sizes", "v_sizes"):
+        if key in raw_hyperparams:
+            hyperparams["v-sizes"] = _parse_v_size_payload(raw_hyperparams[key])
+            break
     return hyperparams
 
 
-def _generated_dataset_dir(root_dir, graph, n, dim, trial_index):
+def _dimension_label(dim, v_sizes=None):
+    if not v_sizes:
+        return str(dim)
+    parts = ["{}{}".format(var, v_sizes[var]) for var in sorted(v_sizes)]
+    return "{}-v{}".format(dim, "_".join(parts))
+
+
+def _generated_dataset_dir(root_dir, graph, n, dim, trial_index, v_sizes=None):
     return Path(root_dir) / "graph={}-n_samples={}-dim={}-trial_index={}".format(
-        graph, n, dim, trial_index)
+        graph, n, _dimension_label(dim, v_sizes), trial_index)
 
 
 def _load_generated_data_bundle(source_path, graph, n, dim, hyperparams):
@@ -413,6 +432,7 @@ def _load_generated_data_bundle(source_path, graph, n, dim, hyperparams):
     with open(metadata_path) as file:
         metadata = json.load(file)
     seed = int(metadata["candidate_seed"])
+    metadata_v_sizes = metadata.get("v_sizes")
 
     dat_path = source_path if source_path.is_file() else source_dir / "{}_dat.th".format(graph)
     if not dat_path.is_file():
@@ -429,6 +449,8 @@ def _load_generated_data_bundle(source_path, graph, n, dim, hyperparams):
     if generated_hp_path.is_file():
         with open(generated_hp_path) as file:
             generated_hp.update(_coerce_generated_hyperparams(json.load(file)))
+    if metadata_v_sizes is not None:
+        generated_hp["v-sizes"] = metadata_v_sizes
 
     cg = CausalGraph.read("dat/cg/{}.cg".format(graph))
     dat_m = _build_dat_model(CTM, cg, dim, generated_hp, seed)
@@ -622,6 +644,14 @@ def main():
         trial_indices = range(args.n_trials)
 
     for graph in graph_set:
+        graph_cg = CausalGraph.read("dat/cg/{}.cg".format(graph))
+        v_size_overrides = parse_var_dim_overrides(args.var_dim, graph_cg, strict=False)
+        if v_size_overrides:
+            hyperparams['v-sizes'] = _build_v_sizes(
+                graph_cg, args.dim, {'v-sizes': v_size_overrides})
+        else:
+            hyperparams.pop('v-sizes', None)
+
         graph_fixed_zero_edges = list(manual_fixed_zero_edges)
         graph_fixed_one_edges = list(manual_fixed_one_edges)
         graph_coupled_edges = list(manual_coupled_edges)
@@ -711,7 +741,7 @@ def main():
                         source_path = args.reuse_data_from
                         if args.reuse_data_root:
                             source_path = _generated_dataset_dir(
-                                args.reuse_data_root, graph, n, d, i)
+                                args.reuse_data_root, graph, n, d, i, hyperparams.get("v-sizes"))
                         data_bundle = _load_generated_data_bundle(
                             source_path, graph, n, d, hyperparams)
                     try:

@@ -25,6 +25,7 @@ from src.ds.causal_graph import CausalGraph
 from src.scm.ctm import CTM
 from src.scm.scm import expand_do
 from .base_runner import BaseRunner
+from .data_setup import _build_v_sizes
 
 
 class SelectionLossCallback(pl.callbacks.Callback):
@@ -149,7 +150,7 @@ class MaskedNCMMinMaxRunner(BaseRunner):
 
                     print('Generating data')
                     cg = CausalGraph.read(cg_file)
-                    v_sizes = {k: 1 if k in {'X', 'Y', 'M', 'W'} else dim for k in cg}
+                    v_sizes = _build_v_sizes(cg, dim, hyperparams)
                     if self.dat_model is CTM:
                         dat_m = self.dat_model(cg, v_size=v_sizes, regions=hyperparams.get('regions', 20),
                                                c2_scale=hyperparams.get('c2-scale', 1.0),

@@ -1,4 +1,5 @@
 import random
+import ast
 import os
 import json
 from dataclasses import dataclass
@@ -19,6 +20,58 @@ class DataBundle:
     stored_metrics: dict
 
 
+DEFAULT_SCALAR_VARS = {'X', 'Y', 'M', 'W'}
+
+
+def _parse_v_size_payload(value):
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = ast.literal_eval(value)
+    if not isinstance(value, dict):
+        raise ValueError("v-sizes must be a dictionary, got {}".format(type(value).__name__))
+    return {str(k): int(v) for k, v in value.items()}
+
+
+def _build_v_sizes(cg, dim, hyperparams=None):
+    if hyperparams is None:
+        hyperparams = {}
+    v_sizes = {k: 1 if k in DEFAULT_SCALAR_VARS else int(dim) for k in cg}
+    v_sizes.update(_parse_v_size_payload(hyperparams.get('v-sizes')))
+    invalid = sorted(set(v_sizes) - set(cg))
+    if invalid:
+        raise ValueError("v-sizes contain variables not in graph: {}".format(invalid))
+    for var, size in v_sizes.items():
+        if size < 1:
+            raise ValueError("dimension for {} must be positive, got {}".format(var, size))
+    return v_sizes
+
+
+def parse_var_dim_overrides(var_dim_args, cg, strict=True):
+    graph_vars = set(cg)
+    overrides = {}
+    for item in var_dim_args or []:
+        if "=" not in item:
+            raise ValueError("--var-dim must be formatted as VAR=DIM, got {}".format(item))
+        var, raw_dim = item.split("=", 1)
+        var = var.strip()
+        if var not in graph_vars:
+            if strict:
+                raise ValueError("--var-dim variable {} is not in graph".format(var))
+            continue
+        try:
+            value = int(raw_dim)
+        except ValueError as exc:
+            raise ValueError("--var-dim dimension must be an integer: {}".format(item)) from exc
+        if value < 1:
+            raise ValueError("--var-dim dimension must be positive: {}".format(item))
+        overrides[var] = value
+    return overrides
+
+
 def _build_stored_metrics(dat_m, dat_sets, do_var_list):
     stored_metrics = dict()
     for i, dat_do_set in enumerate(do_var_list):
@@ -33,7 +86,7 @@ def _build_stored_metrics(dat_m, dat_sets, do_var_list):
 
 def _build_dat_model(dat_model, cg, dim, hyperparams, seed, runtime=False):
     if dat_model is CTM:
-        v_sizes = {k: 1 if k in {'X', 'Y', 'M', 'W'} else dim for k in cg}
+        v_sizes = _build_v_sizes(cg, dim, hyperparams)
         return dat_model(
             cg,
             v_size=v_sizes,
@@ -83,6 +136,10 @@ def _coerce_numeric_hyperparams(raw_hyperparams):
     value = raw_hyperparams.get("c2-scale")
     if value is not None:
         coerced["c2-scale"] = float(value)
+    for key in ("v-sizes", "v_sizes"):
+        if key in raw_hyperparams:
+            coerced["v-sizes"] = _parse_v_size_payload(raw_hyperparams[key])
+            break
     return coerced
 
 

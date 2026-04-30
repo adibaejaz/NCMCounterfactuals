@@ -17,7 +17,12 @@ import torch as T
 from src.ds.causal_graph import CausalGraph
 from src.metric.evaluation import scm_query_bound_metrics, serialize_probability
 from src.metric.queries import get_experimental_variables
-from src.run.data_setup import _build_dat_model, _build_stored_metrics
+from src.run.data_setup import (
+    _build_dat_model,
+    _build_stored_metrics,
+    _build_v_sizes,
+    parse_var_dim_overrides,
+)
 from src.scm.ctm import CTM
 from src.scm.scm import expand_do
 
@@ -47,10 +52,6 @@ def _parse_do_var_list(args):
     if args.do_regime == "graph-default":
         return get_experimental_variables(args.graph)
     raise ValueError("unknown do regime: {}".format(args.do_regime))
-
-
-def _v_sizes(cg, dim):
-    return {k: 1 if k in {"X", "Y", "M", "W"} else dim for k in cg}
 
 
 def _bit_columns(data, variables):
@@ -261,11 +262,18 @@ def _adjustment_separation_diagnostics(bound_diagnostics, args):
     }
 
 
-def _trial_directory(root, graph, n, dim, trial_index):
+def _dimension_label(dim, v_sizes=None):
+    if not v_sizes:
+        return str(dim)
+    parts = ["{}{}".format(var, v_sizes[var]) for var in sorted(v_sizes)]
+    return "{}-v{}".format(dim, "_".join(parts))
+
+
+def _trial_directory(root, graph, n, dim, trial_index, v_sizes=None):
     return os.path.join(
         root,
         "graph={}-n_samples={}-dim={}-trial_index={}".format(
-            graph, n, dim, trial_index))
+            graph, n, _dimension_label(dim, v_sizes), trial_index))
 
 
 def _write_json(path, obj):
@@ -315,6 +323,7 @@ def _candidate_seed(args, trial_index, retry_index, hyperparams, do_var_list):
         "retry_index": retry_index,
         "n_samples": args.n_samples,
         "dim": args.dim,
+        "v_sizes": hyperparams.get("v-sizes"),
         "hyperparams": hyperparams,
         "do_var_list": do_var_list,
         "bound": {
@@ -355,7 +364,10 @@ def _disabled_positivity_diagnostics(args):
 
 
 def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
-    out_dir = _trial_directory(args.name, args.graph, args.n_samples, args.dim, trial_index)
+    v_sizes = _build_v_sizes(cg, args.dim, hyperparams)
+    explicit_v_sizes = v_sizes if hyperparams.get("v-sizes") else None
+    out_dir = _trial_directory(
+        args.name, args.graph, args.n_samples, args.dim, trial_index, explicit_v_sizes)
     if os.path.isfile(os.path.join(out_dir, "dat.th")) and not args.overwrite:
         print("[done]", out_dir)
         return
@@ -364,7 +376,6 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
     if args.overwrite and os.path.isfile(reject_log):
         os.remove(reject_log)
 
-    v_sizes = _v_sizes(cg, args.dim)
     for retry_index in range(args.max_retries + 1):
         seed = _candidate_seed(args, trial_index, retry_index, hyperparams, do_var_list)
         print("[candidate] graph={} trial={} retry={} seed={}".format(
@@ -411,6 +422,8 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
             "candidate_seed": int(seed),
             "n_samples": int(args.n_samples),
             "dim": int(args.dim),
+            "v_sizes": {k: int(v) for (k, v) in v_sizes.items()},
+            "dimension_label": _dimension_label(args.dim, explicit_v_sizes),
             "generator": "CTM",
             "do_var_list": do_var_list,
             "accepted": len(reject_reasons) == 0,
@@ -463,6 +476,8 @@ def build_parser():
                         help="specific trial index to generate; may be repeated")
     parser.add_argument("--n-samples", type=int, default=10000)
     parser.add_argument("--dim", type=int, default=1)
+    parser.add_argument("--var-dim", action="append", default=[],
+                        help="per-variable dimension override formatted as VAR=DIM; may be repeated")
     parser.add_argument("--regions", type=int, default=20)
     parser.add_argument("--c2-scale", type=float, default=2.0)
     parser.add_argument("--gen-bs", type=int, default=10000)
@@ -515,6 +530,8 @@ def main():
         raise ValueError("graph {} does not contain {}".format(args.graph, sorted(required_vars)))
 
     do_var_list = _parse_do_var_list(args)
+    v_size_overrides = parse_var_dim_overrides(args.var_dim, cg, strict=False)
+
     hyperparams = {
         "regions": args.regions,
         "c2-scale": args.c2_scale,
@@ -531,6 +548,8 @@ def main():
         "bound-outcome": args.bound_outcome,
         "bound-outcome-value": args.bound_outcome_value,
     }
+    if v_size_overrides:
+        hyperparams["v-sizes"] = _build_v_sizes(cg, args.dim, {"v-sizes": v_size_overrides})
 
     trial_indices = args.trial_index if args.trial_index else range(args.n_trials)
     for trial_index in trial_indices:

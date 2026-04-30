@@ -4,6 +4,7 @@ import torch as T
 import src.metric.divergences as dvg
 from src.ds.counterfactual import CTF
 from src.metric.evaluation import all_metrics
+from src.run.data_setup import _build_v_sizes
 from src.scm.scm import expand_do
 from src.scm.masked_scm import (
     DEFAULT_GATE_SHARPNESS,
@@ -65,7 +66,7 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         if hyperparams is None:
             hyperparams = dict()
 
-        v_size = {v: dim if v not in ('X', 'Y') else 1 for v in cg.v}
+        v_size = _build_v_sizes(cg, dim, hyperparams)
         ncm = ncm_model(
             v=list(cg.v),
             v_size=v_size,
