@@ -206,6 +206,8 @@ def _adjustment_query_sets(graph_name):
         return (("Z",), ("W",))
     if graph_name == "four_clique":
         return (("Z", "W"), ("Z",), ("W",))
+    if graph_name == "barley":
+        return (("srtprot",), ("sorttkv",), ("srtsize",))
     return ()
 
 
@@ -330,6 +332,28 @@ def _default_positivity_epsilon(cg):
     return 0.005
 
 
+def _disabled_adjustment_diagnostics():
+    return {
+        "enabled": False,
+        "passed": True,
+        "reason": "disabled_by_no_adjustment_gap",
+    }
+
+
+def _disabled_positivity_diagnostics(args):
+    return {
+        "enabled": False,
+        "passed": True,
+        "reason": "disabled_by_no_positivity",
+        "positivity_epsilon": float(args.positivity_epsilon),
+        "positivity_mc_samples": int(args.positivity_mc_samples),
+        "min_empirical_cell_count": int(args.min_empirical_cell_count),
+        "min_true_joint_probability": None,
+        "min_empirical_joint_count": None,
+        "regimes": [],
+    }
+
+
 def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
     out_dir = _trial_directory(args.name, args.graph, args.n_samples, args.dim, trial_index)
     if os.path.isfile(os.path.join(out_dir, "dat.th")) and not args.overwrite:
@@ -354,15 +378,22 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
             do_var_list=do_var_list,
             seed=seed)
         bound = _bound_diagnostics(dat_m, args)
-        adjustment = _adjustment_separation_diagnostics(bound, args)
-        positivity = _joint_positivity_diagnostics(
-            dat_m=dat_m,
-            dat_sets=dat_sets,
-            do_var_list=do_var_list,
-            v_sizes=v_sizes,
-            true_n=args.positivity_mc_samples,
-            epsilon=args.positivity_epsilon,
-            min_count=args.min_empirical_cell_count)
+        if args.no_adjustment_gap:
+            adjustment = _disabled_adjustment_diagnostics()
+        else:
+            adjustment = _adjustment_separation_diagnostics(bound, args)
+
+        if args.no_positivity:
+            positivity = _disabled_positivity_diagnostics(args)
+        else:
+            positivity = _joint_positivity_diagnostics(
+                dat_m=dat_m,
+                dat_sets=dat_sets,
+                do_var_list=do_var_list,
+                v_sizes=v_sizes,
+                true_n=args.positivity_mc_samples,
+                epsilon=args.positivity_epsilon,
+                min_count=args.min_empirical_cell_count)
 
         reject_reasons = []
         if not bound["passed"]:
@@ -386,7 +417,9 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
             "reject_reasons": reject_reasons,
             "bound_gap_min": float(args.bound_gap_min),
             "adjustment_gap_min": float(args.adjustment_gap_min),
+            "adjustment_gap_enabled": not args.no_adjustment_gap,
             "positivity_epsilon": float(args.positivity_epsilon),
+            "positivity_enabled": not args.no_positivity,
             "min_empirical_cell_count": int(args.min_empirical_cell_count),
         }
 
@@ -447,11 +480,15 @@ def build_parser():
     parser.add_argument("--bound-mc-samples", type=int, default=1000000)
     parser.add_argument("--adjustment-gap-min", type=float, default=0.1,
                         help="minimum absolute gap between P(y|x) and at least one adjustment query")
+    parser.add_argument("--no-adjustment-gap", action="store_true",
+                        help="do not require adjustment queries to differ from the conditional query")
 
     parser.add_argument("--positivity-epsilon", type=float, default=None,
                         help="minimum true joint cell probability; defaults to 0.01 for <=3 nodes and 0.005 otherwise")
     parser.add_argument("--positivity-mc-samples", type=int, default=1000000)
     parser.add_argument("--min-empirical-cell-count", type=int, default=10)
+    parser.add_argument("--no-positivity", action="store_true",
+                        help="do not require true/empirical joint positivity")
     parser.add_argument("--max-retries", type=int, default=1000)
     parser.add_argument("--overwrite", action="store_true")
     return parser
@@ -459,6 +496,11 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    if args.graph == "barley":
+        if args.bound_treatment == "X":
+            args.bound_treatment = "sort"
+        if args.bound_outcome == "Y":
+            args.bound_outcome = "protein"
     if args.n_trials < 0:
         raise ValueError("--n-trials must be nonnegative")
     if args.max_retries < 0:
@@ -478,9 +520,10 @@ def main():
         "c2-scale": args.c2_scale,
         "gen-bs": args.gen_bs,
         "do-var-list": do_var_list,
-        "positivity": True,
+        "positivity": not args.no_positivity,
         "bound-gap-min": args.bound_gap_min,
         "adjustment-gap-min": args.adjustment_gap_min,
+        "adjustment-gap-enabled": not args.no_adjustment_gap,
         "positivity-epsilon": args.positivity_epsilon,
         "min-empirical-cell-count": args.min_empirical_cell_count,
         "bound-treatment": args.bound_treatment,

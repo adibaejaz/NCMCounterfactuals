@@ -429,6 +429,60 @@ def _four_clique_query_bound_metrics(
     }
 
 
+def _barley_query_bound_metrics(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        do_name,
+        n,
+        truth_kwargs,
+        stored):
+    srtprot_adjusted = _adjusted_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        ("srtprot",),
+        do_name,
+        n,
+        truth_kwargs,
+        stored)
+    sorttkv_adjusted = _adjusted_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        ("sorttkv",),
+        do_name,
+        n,
+        truth_kwargs,
+        stored)
+    srtsize_adjusted = _adjusted_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        ("srtsize",),
+        do_name,
+        n,
+        truth_kwargs,
+        stored)
+
+    values = [srtprot_adjusted, sorttkv_adjusted, srtsize_adjusted]
+    return {
+        "adjusted_srtprot": srtprot_adjusted,
+        "adjusted_sorttkv": sorttkv_adjusted,
+        "adjusted_srtsize": srtsize_adjusted,
+        "lower": min(values),
+        "upper": max(values),
+    }
+
+
 def scm_query_bound_metrics(
         truth,
         graph_name=None,
@@ -441,6 +495,11 @@ def scm_query_bound_metrics(
         truth_kwargs=None):
     metrics = dict()
     graph_name = graph_name.lower() if graph_name is not None else None
+    if graph_name == "barley":
+        if treatment_var == "X":
+            treatment_var = "sort"
+        if outcome_var == "Y":
+            outcome_var = "protein"
     outcome_event = {outcome_var: outcome_value}
 
     for treatment_value in treatment_values:
@@ -472,6 +531,17 @@ def scm_query_bound_metrics(
                 stored)
         elif graph_name == "four_clique":
             bound = _four_clique_query_bound_metrics(
+                metrics,
+                truth,
+                outcome_event,
+                treatment_var,
+                treatment_value,
+                do_name,
+                n,
+                truth_kwargs,
+                stored)
+        elif graph_name == "barley":
+            bound = _barley_query_bound_metrics(
                 metrics,
                 truth,
                 outcome_event,

@@ -91,6 +91,7 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
             fixed_zero_mask=hyperparams.get('mask-fixed-zero-mask', None),
             fixed_one_edges=hyperparams.get('mask-fixed-one-edges', None),
             fixed_one_mask=hyperparams.get('mask-fixed-one-mask', None),
+            coupled_edges=hyperparams.get('mask-coupled-edges', None),
             mask_init_mode=hyperparams.get('mask-init-mode', 'constant'),
             mask_init_value=hyperparams.get('mask-init-value', 0.5),
             mask_init_range=hyperparams.get('mask-init-range', (0.25, 0.75)),
@@ -109,9 +110,16 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.mc_sample_size = hyperparams.get("mc-sample-size", 10000)
         self.min_lambda = hyperparams.get("min-lambda", 0.001)
         self.max_lambda = hyperparams.get("max-lambda", 1.0)
+        self.selection_query_lambda = float(
+            hyperparams.get("selection-query-lambda", self.min_lambda))
+        if self.selection_query_lambda < 0:
+            raise ValueError("selection-query-lambda must be nonnegative")
         self.query_update_target = hyperparams.get("query-update-target", "mask")
         if self.query_update_target not in {"mask", "theta", "all"}:
             raise ValueError("query-update-target must be one of: mask, theta, all")
+        self.mask_fit_loss_weight = float(hyperparams.get("mask-fit-loss-weight", 1.0))
+        if self.mask_fit_loss_weight < 0:
+            raise ValueError("mask-fit-loss-weight must be nonnegative")
         self.alt_opt = hyperparams.get("alt-opt", False)
         self.theta_steps_per_mask = hyperparams.get("theta-steps-per-mask", 5)
         self.mask_steps_per_theta = hyperparams.get("mask-steps-per-theta", 1)
@@ -293,10 +301,40 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
     def on_train_epoch_start(self):
         self._alm_h_sum = 0.0
         self._alm_h_count = 0
+        self._selection_mmd_sum = 0.0
+        self._selection_mmd_count = 0
 
     def on_train_epoch_end(self):
-        if not self.dag_alm:
+        if self.dag_alm:
+            self._update_dag_alm()
+
+    def _log_selection_loss(self):
+        if self._selection_mmd_count <= 0:
             return
+        with T.no_grad():
+            selection_mmd_loss = self._selection_mmd_sum / self._selection_mmd_count
+            (
+                cycle_loss, _dag_h, _mask_l1, mask_l1_loss, _mask_binary,
+                mask_binary_loss, _mask_non_collider,
+                mask_non_collider_loss) = self._compute_structure_terms()
+            selection_structure_loss = (
+                cycle_loss + mask_l1_loss + mask_binary_loss + mask_non_collider_loss)
+            selection_query_loss = self.mask_parameter.new_tensor(0.0)
+            if self.max_query is not None and self.selection_query_lambda > 0:
+                query_objective = self._get_q_loss()
+                if not T.isnan(query_objective):
+                    selection_query_loss = self.selection_query_lambda * query_objective
+            selection_mmd_loss = selection_query_loss.new_tensor(selection_mmd_loss)
+            selection_loss = (
+                selection_mmd_loss + selection_structure_loss + selection_query_loss)
+
+        self.log("selection_loss", selection_loss, prog_bar=True)
+        self.log("selection_mmd_loss", selection_mmd_loss, prog_bar=False)
+        self.log("selection_structure_loss", selection_structure_loss, prog_bar=False)
+        self.log("selection_query_loss", selection_query_loss, prog_bar=False)
+        self.log("selection_query_lambda", self.selection_query_lambda, prog_bar=False)
+
+    def _update_dag_alm(self):
         if self._alm_h_count <= 0:
             return
         if (self.current_epoch + 1) % self.alm_update_every != 0:
@@ -337,7 +375,12 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
 
         active_opt.zero_grad()
         mmd_loss = self._compute_fit_loss(batch)
-        objective_loss = mmd_loss + q_loss
+        self._selection_mmd_sum += mmd_loss.detach().item()
+        self._selection_mmd_count += 1
+        weighted_mmd_loss = mmd_loss
+        if phase == "mask":
+            weighted_mmd_loss = self.mask_fit_loss_weight * mmd_loss
+        objective_loss = weighted_mmd_loss + q_loss
         structure_loss = (
             cycle_loss + mask_l1_loss + mask_binary_loss + mask_non_collider_loss)
         if phase == "mask":
@@ -358,10 +401,11 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         mask_non_collider_val = mask_non_collider.item()
         mask_non_collider_loss_val = mask_non_collider_loss.item()
         q_loss_val = q_loss.item() if T.is_tensor(q_loss) else q_loss
+        weighted_mmd_loss_val = weighted_mmd_loss.item() if T.is_tensor(weighted_mmd_loss) else weighted_mmd_loss
         objective_loss_val = objective_loss.item()
         structure_loss_val = structure_loss.item() if T.is_tensor(structure_loss) else structure_loss
         if self.log_grad_norms:
-            mask_fit_grad_norm = self._mask_grad_norm(mmd_loss)
+            mask_fit_grad_norm = self._mask_grad_norm(weighted_mmd_loss)
             mask_query_grad_norm = self._mask_grad_norm(q_loss)
             mask_dag_grad_norm = self._mask_grad_norm(cycle_loss)
             mask_total_grad_norm = self._mask_grad_norm(loss)
@@ -382,6 +426,8 @@ class MaskedDivergencePipeline(MaskedBasePipeline):
         self.log("objective_loss", objective_loss_val, prog_bar=True)
         self.log("structure_loss", structure_loss_val, prog_bar=True)
         self.log("mmd_loss", mmd_loss_val, prog_bar=True)
+        self.log("weighted_mmd_loss", weighted_mmd_loss_val, prog_bar=False)
+        self.log("mask_fit_loss_weight", self.mask_fit_loss_weight if phase == "mask" else 1.0, prog_bar=False)
         self.log("dag_h", dag_h_val, prog_bar=True)
         self.log("cycle_loss", cycle_loss_val, prog_bar=True)
         if self.dag_alm:

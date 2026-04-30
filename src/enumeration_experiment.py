@@ -26,7 +26,7 @@ VALID_GENERATORS = {
 
 VALID_GRAPHS = {
     "backdoor", "bow", "frontdoor", "napkin", "simple", "chain", "bdm", "med", "expl", "double_bow", "iv", "bad_fd",
-    "extended_bow", "bad_m", "m", "square", "four_clique",
+    "extended_bow", "bad_m", "m", "square", "four_clique", "barley",
     "zid_a", "zid_b", "zid_c",
     "gid_a", "gid_b", "gid_c", "gid_d",
     "med_c1", "med_c2",
@@ -130,6 +130,11 @@ def main():
     args = parser.parse_args()
     if args.query_track is not None:
         args.query_track = args.query_track.lower()
+    if args.bound_query and args.graph == "barley":
+        if args.bound_treatment == "X":
+            args.bound_treatment = "sort"
+        if args.bound_outcome == "Y":
+            args.bound_outcome = "protein"
 
     if args.bound_query and not _graph_has_vars(args.graph, {args.bound_treatment, args.bound_outcome}):
         raise ValueError("graph {} does not contain {} and {}".format(

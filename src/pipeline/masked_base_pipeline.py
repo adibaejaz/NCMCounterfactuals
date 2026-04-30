@@ -28,6 +28,7 @@ class MaskedBasePipeline(BasePipeline):
             fixed_zero_mask=None,
             fixed_one_edges=None,
             fixed_one_mask=None,
+            coupled_edges=None,
             mask_init_mode="constant",
             mask_init_value=0.5,
             mask_init_range=(0.25, 0.75),
@@ -40,6 +41,8 @@ class MaskedBasePipeline(BasePipeline):
             fixed_one_edges=fixed_one_edges,
             fixed_one_mask=fixed_one_mask,
         )
+        self.coupled_edge_indices = self._build_coupled_edge_indices(coupled_edges)
+        self._validate_coupled_edges()
 
         if init_mask is None:
             init_mask = self._init_mask(
@@ -52,8 +55,17 @@ class MaskedBasePipeline(BasePipeline):
             eps = 1e-6
             init_logits = logit(init_mask.clamp(min=eps, max=1 - eps))
             self.mask_parameter = T.nn.Parameter(init_logits)
+            if self.coupled_edge_indices:
+                init_coupled = T.tensor(
+                    [init_mask[i, j].item() for (i, j) in self.coupled_edge_indices],
+                    dtype=T.float)
+                init_coupled_logits = logit(init_coupled.clamp(min=eps, max=1 - eps))
+                self.coupled_mask_parameter = T.nn.Parameter(init_coupled_logits)
+            else:
+                self.register_buffer("coupled_mask_parameter", T.empty(0))
         else:
             self.register_buffer("mask_parameter", init_mask)
+            self.register_buffer("coupled_mask_parameter", T.empty(0))
 
         self.learn_mask = learn_mask
         self.use_dag_updates = use_dag_updates
@@ -61,18 +73,22 @@ class MaskedBasePipeline(BasePipeline):
     def mask_parameters(self):
         if not self.learn_mask:
             return []
-        return [self.mask_parameter]
+        params = [self.mask_parameter]
+        if self.coupled_edge_indices:
+            params.append(self.coupled_mask_parameter)
+        return params
 
     def theta_parameters(self):
+        mask_param_ids = {id(param) for param in self.mask_parameters()}
         return [
             param
-            for name, param in self.named_parameters()
-            if name != "mask_parameter"
+            for param in self.parameters()
+            if id(param) not in mask_param_ids
         ]
 
     def set_mask_requires_grad(self, flag: bool):
-        if self.learn_mask:
-            self.mask_parameter.requires_grad_(flag)
+        for param in self.mask_parameters():
+            param.requires_grad_(flag)
 
     def set_theta_requires_grad(self, flag: bool):
         for param in self.theta_parameters():
@@ -131,6 +147,36 @@ class MaskedBasePipeline(BasePipeline):
         self.register_buffer("fixed_one_mask", one_mask)
         return self.fixed_zero_mask, self.fixed_one_mask
 
+    def _build_coupled_edge_indices(self, coupled_edges=None):
+        if coupled_edges is None:
+            coupled_edges = []
+        v2i = {v: i for i, v in enumerate(self.ncm.v)}
+        indices = []
+        seen = set()
+        for src, dst in coupled_edges:
+            if src not in v2i or dst not in v2i:
+                raise ValueError("unknown coupled edge {} -- {}".format(src, dst))
+            if src == dst:
+                raise ValueError("coupled edge cannot be a self-edge: {}".format(src))
+            canon_src, canon_dst = tuple(sorted((src, dst)))
+            key = (canon_src, canon_dst)
+            if key in seen:
+                continue
+            seen.add(key)
+            indices.append((v2i[canon_src], v2i[canon_dst]))
+        return indices
+
+    def _validate_coupled_edges(self):
+        for i, j in self.coupled_edge_indices:
+            if self.fixed_zero_mask[i, j].item() == 0 or self.fixed_zero_mask[j, i].item() == 0:
+                raise ValueError(
+                    "coupled edge {} -- {} conflicts with fixed-zero constraints".format(
+                        self.ncm.v[i], self.ncm.v[j]))
+            if self.fixed_one_mask[i, j].item() != 0 or self.fixed_one_mask[j, i].item() != 0:
+                raise ValueError(
+                    "coupled edge {} -- {} conflicts with fixed-one constraints".format(
+                        self.ncm.v[i], self.ncm.v[j]))
+
     def _init_mask(self, mode="constant", value=0.5, value_range=(0.25, 0.75)):
         n = len(self.ncm.v)
         eye = T.eye(n, dtype=T.float)
@@ -154,11 +200,29 @@ class MaskedBasePipeline(BasePipeline):
         one_mask = self.fixed_one_mask.to(device=mask.device, dtype=mask.dtype)
         return mask * zero_mask * (1 - one_mask) + one_mask
 
+    def _apply_coupled_edges(self, mask):
+        if not self.coupled_edge_indices:
+            return mask
+        mask = mask.clone()
+        if self.learn_mask:
+            coupled_values = T.sigmoid(self.coupled_mask_parameter).to(
+                device=mask.device, dtype=mask.dtype)
+        else:
+            coupled_values = T.stack([
+                mask[i, j] for (i, j) in self.coupled_edge_indices
+            ])
+        for k, (i, j) in enumerate(self.coupled_edge_indices):
+            value = coupled_values[k]
+            mask[i, j] = value
+            mask[j, i] = 1 - value
+        return mask
+
     def get_mask(self):
         if self.learn_mask:
             mask = T.sigmoid(self.mask_parameter)
         else:
             mask = self.mask_parameter
+        mask = self._apply_coupled_edges(mask)
         return self._apply_fixed_masks(mask)
 
     def get_edge_scores(self):

@@ -4,6 +4,7 @@ import json
 import os
 import random
 import shutil
+import time
 
 import numpy as np
 import pytorch_lightning as pl
@@ -18,6 +19,11 @@ from .data_setup import build_data_bundle
 class EnumerationNCMRunner(BaseRunner):
     def __init__(self, pipeline, dat_model, ncm_model):
         super().__init__(pipeline, dat_model, ncm_model)
+
+    @staticmethod
+    def _sync_cuda():
+        if T.cuda.is_available():
+            T.cuda.synchronize()
 
     def create_trainer(self, directory, gpu=None):
         checkpoint = pl.callbacks.ModelCheckpoint(
@@ -129,19 +135,23 @@ class EnumerationNCMRunner(BaseRunner):
                     return
 
                 print("[running]", out_dir)
+                total_start = time.perf_counter()
 
                 data_seed = self.get_data_seed(key)
                 print("Data Key:", key)
                 print("Run Key:", run_key)
                 print("Data Seed:", data_seed)
 
+                data_setup_start = time.perf_counter()
                 if data_bundle is None:
                     T.manual_seed(data_seed)
                     T.cuda.manual_seed_all(data_seed)
                     np.random.seed(data_seed)
                     random.seed(data_seed)
                     data_bundle = build_data_bundle(self.dat_model, cg_file, n, dim, hyperparams, data_seed)
+                data_setup_wall_seconds = time.perf_counter() - data_setup_start
 
+                graph_generation_start = time.perf_counter()
                 class_spec = read_equivalence_class(eq_file)
                 if set(class_spec.vertices) != set(data_bundle.cg.v):
                     raise ValueError("equivalence class vertices must match the data graph vertices")
@@ -149,6 +159,7 @@ class EnumerationNCMRunner(BaseRunner):
                 dags = enumerate_dags_in_class(class_spec, max_dags=hyperparams.get("max-enum-dags"))
                 if not dags:
                     raise ValueError("equivalence class enumeration produced no DAGs")
+                graph_generation_wall_seconds = time.perf_counter() - graph_generation_start
 
                 os.makedirs(out_dir, exist_ok=True)
                 with open(os.path.join(out_dir, "hyperparams.json"), "w") as file:
@@ -160,6 +171,7 @@ class EnumerationNCMRunner(BaseRunner):
                         "num_directed_edges": len(class_spec.directed_edges),
                         "num_undirected_edges": len(class_spec.undirected_edges),
                         "num_dags": len(dags),
+                        "graph_generation_wall_seconds": graph_generation_wall_seconds,
                     }, file)
 
                 if gpu is None:
@@ -178,6 +190,7 @@ class EnumerationNCMRunner(BaseRunner):
                         continue
 
                     dag_results = []
+                    rerun_start = time.perf_counter()
                     for dag_index, dag in enumerate(dags):
                         candidate_dir = os.path.join(rerun_dir, "dags", "{:04d}".format(dag_index))
                         existing = self._load_existing_candidate(candidate_dir)
@@ -185,6 +198,7 @@ class EnumerationNCMRunner(BaseRunner):
                             dag_results.append(existing)
                             continue
 
+                        candidate_start = time.perf_counter()
                         os.makedirs(candidate_dir, exist_ok=True)
                         graph_file = os.path.join(candidate_dir, "graph.cg")
                         dag.save(graph_file)
@@ -207,6 +221,8 @@ class EnumerationNCMRunner(BaseRunner):
                         )
 
                         stored_metrics = dict(data_bundle.stored_metrics)
+                        self._sync_cuda()
+                        initial_eval_start = time.perf_counter()
                         start_metrics = evaluation.all_metrics(
                             model.generator,
                             model.ncm,
@@ -216,15 +232,23 @@ class EnumerationNCMRunner(BaseRunner):
                             stored=stored_metrics,
                             query_track=hyperparams["eval-query"],
                         )
+                        self._sync_cuda()
+                        initial_eval_wall_seconds = time.perf_counter() - initial_eval_start
                         true_q = "true_{}".format(evaluation.serialize_query(hyperparams["eval-query"]))
                         stored_metrics[true_q] = start_metrics[true_q]
                         model.update_metrics(stored_metrics)
 
                         trainer, checkpoint = self.create_trainer(candidate_dir, gpu)
+                        self._sync_cuda()
+                        train_start = time.perf_counter()
                         trainer.fit(model)
+                        self._sync_cuda()
                         ckpt = T.load(checkpoint.best_model_path)
                         model.load_state_dict(ckpt["state_dict"])
+                        train_wall_seconds = time.perf_counter() - train_start
 
+                        self._sync_cuda()
+                        final_eval_start = time.perf_counter()
                         results = evaluation.all_metrics(
                             model.generator,
                             model.ncm,
@@ -233,11 +257,17 @@ class EnumerationNCMRunner(BaseRunner):
                             n=1000000,
                             query_track=hyperparams["eval-query"],
                         )
+                        self._sync_cuda()
+                        final_eval_wall_seconds = time.perf_counter() - final_eval_start
                         results["dag_index"] = dag_index
                         results["rerun_index"] = rerun_index
                         results["train_seed"] = train_seed
                         results["graph_file"] = graph_file
                         results["graph_edges"] = list(dag.de)
+                        results["initial_eval_wall_seconds"] = initial_eval_wall_seconds
+                        results["train_wall_seconds"] = train_wall_seconds
+                        results["final_eval_wall_seconds"] = final_eval_wall_seconds
+                        results["dag_total_wall_seconds"] = time.perf_counter() - candidate_start
                         if verbose:
                             print(results)
 
@@ -254,6 +284,18 @@ class EnumerationNCMRunner(BaseRunner):
                         stored_metrics=data_bundle.stored_metrics,
                     )
                     summary["rerun_index"] = rerun_index
+                    summary["data_setup_wall_seconds"] = data_setup_wall_seconds
+                    summary["enum_graph_generation_wall_seconds"] = graph_generation_wall_seconds
+                    summary["enum_initial_eval_wall_seconds"] = sum(
+                        float(row.get("initial_eval_wall_seconds", 0.0)) for row in dag_results)
+                    summary["enum_training_wall_seconds"] = sum(
+                        float(row.get("train_wall_seconds", 0.0)) for row in dag_results)
+                    summary["enum_final_eval_wall_seconds"] = sum(
+                        float(row.get("final_eval_wall_seconds", 0.0)) for row in dag_results)
+                    summary["enum_candidate_wall_seconds"] = sum(
+                        float(row.get("dag_total_wall_seconds", 0.0)) for row in dag_results)
+                    summary["enum_rerun_wall_seconds"] = time.perf_counter() - rerun_start
+                    summary["enum_total_wall_seconds"] = time.perf_counter() - total_start
                     with open(os.path.join(rerun_dir, "dag_results.json"), "w") as file:
                         json.dump(dag_results, file)
                     with open(rerun_final_path, "w") as file:

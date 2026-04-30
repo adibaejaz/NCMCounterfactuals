@@ -26,6 +26,12 @@ from src.scm.scm import expand_do
 from .base_runner import BaseRunner
 
 
+class SelectionLossCallback(pl.callbacks.Callback):
+    def on_train_epoch_end(self, trainer, pl_module):
+        if hasattr(pl_module, "_log_selection_loss"):
+            pl_module._log_selection_loss()
+
+
 class MaskedNCMMinMaxRunner(BaseRunner):
     """Run a paired masked min/max experiment and report metrics for both models."""
 
@@ -39,14 +45,17 @@ class MaskedNCMMinMaxRunner(BaseRunner):
             checkpoint_dir = f'{directory}/{r}/checkpoints_{phase}/'
         checkpoint = pl.callbacks.ModelCheckpoint(
             dirpath=checkpoint_dir,
-            monitor="objective_loss",
+            monitor="selection_loss",
+            mode="min",
             save_last=True,
         )
         return pl.Trainer(
             callbacks=[
+                SelectionLossCallback(),
                 checkpoint,
                 pl.callbacks.EarlyStopping(
-                    monitor="objective_loss",
+                    monitor="selection_loss",
+                    mode="min",
                     patience=early_stop_patience,
                     min_delta=early_stop_min_delta,
                     check_on_train_epoch_end=True),

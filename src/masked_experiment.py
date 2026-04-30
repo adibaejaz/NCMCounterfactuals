@@ -21,6 +21,7 @@ import torch as T
 
 from src.ds import CTF, CTFTerm
 from src.ds.causal_graph import CausalGraph
+from src.ds.equivalence_class import read_equivalence_class
 from src.metric.queries import get_query, get_experimental_variables, is_q_id_in_G
 from src.pipeline import MaskedDivergencePipeline
 from src.run import MaskedNCMMinMaxRunner, MaskedNCMRunner
@@ -47,7 +48,7 @@ valid_generators = {
 
 valid_graphs = {
     "backdoor", "bow", "frontdoor", "napkin", "simple", "chain", "bdm", "med", "expl", "double_bow", "iv", "bad_fd",
-    "extended_bow", "bad_m", "m", "square", "four_clique",
+    "extended_bow", "bad_m", "m", "square", "four_clique", "barley",
     "zid_a", "zid_b", "zid_c",
     "gid_a", "gid_b", "gid_c", "gid_d",
     "med_c1", "med_c2",
@@ -105,11 +106,13 @@ parser.add_argument("--train-seed-offset", type=int, default=0,
                     help="offset added to min-max model initialization seeds without changing data seeds")
 parser.add_argument("--max-query-iters", type=int, default=3000, help="number of min-max training epochs")
 parser.add_argument("--early-stop-patience", type=int, default=100,
-                    help="stop min-max training after this many epochs without sufficient objective_loss improvement")
+                    help="stop min-max training after this many epochs without sufficient selection_loss improvement")
 parser.add_argument("--early-stop-min-delta", type=float, default=1e-6,
-                    help="minimum objective_loss improvement required to reset min-max early stopping patience")
+                    help="minimum selection_loss improvement required to reset min-max early stopping patience")
 parser.add_argument("--max-lambda", type=float, default=1.0, help="initial query regularization weight")
 parser.add_argument("--min-lambda", type=float, default=0.001, help="final query regularization weight")
+parser.add_argument("--selection-query-lambda", type=float, default=None,
+                    help="constant query weight for checkpoint/early-stopping selection loss; defaults to --min-lambda")
 parser.add_argument("--mc-sample-size", type=int, default=10000, help="sample size for query optimization")
 parser.add_argument("--query-update-target", choices=["mask", "theta", "all"], default="mask",
                     help="which parameter block receives query-loss gradients during alternating optimization")
@@ -160,6 +163,10 @@ parser.add_argument('--mask-fixed-zero', action='append', default=[],
                     help="edge to constrain to 0, formatted as SRC->DST; may be repeated")
 parser.add_argument('--mask-fixed-one', action='append', default=[],
                     help="edge to constrain to 1, formatted as SRC->DST; may be repeated")
+parser.add_argument('--mask-coupled-edge', action='append', default=[],
+                    help="unordered edge to orient with one coupled logit, formatted as SRC--DST; may be repeated")
+parser.add_argument('--mask-equiv-class-file',
+                    help="equivalence-class graph file; directed edges are fixed, undirected edges are coupled, non-edges are fixed zero")
 parser.add_argument('--cycle-lambda', type=float, default=0.0,
                     help="weight on the DAG penalty")
 parser.add_argument('--cycle-penalty', default="dagma", choices=["notears", "dagma"],
@@ -174,6 +181,8 @@ parser.add_argument('--mask-non-collider', action='append', default=[],
                     help="triple X,Y,Z for which X->Y<-Z is penalized; may be repeated")
 parser.add_argument('--mask-non-collider-lambda', type=float, default=0.1,
                     help="weight on non-collider regularization")
+parser.add_argument('--mask-fit-loss-weight', type=float, default=1.0,
+                    help="weight on data-fit loss during mask updates; set to 0 to make mask updates use only query and structure losses")
 parser.add_argument('--dag-alm', action="store_true",
                     help="use a simplified augmented Lagrangian for the NOTEARS acyclicity constraint")
 parser.add_argument('--alm-alpha-init', type=float, default=0.0,
@@ -233,6 +242,100 @@ def _parse_fixed_zero_edges(specs):
 
 def _parse_fixed_one_edges(specs):
     return _parse_fixed_edges(specs, "fixed-one")
+
+
+def _parse_coupled_edges(specs):
+    edges = []
+    for spec in specs:
+        if "--" not in spec:
+            raise ValueError("coupled edge '{}' must have form SRC--DST".format(spec))
+        src, dst = spec.split("--", 1)
+        src = src.strip()
+        dst = dst.strip()
+        if not src or not dst:
+            raise ValueError("coupled edge '{}' must have non-empty SRC and DST".format(spec))
+        if src == dst:
+            raise ValueError("coupled edge '{}' cannot be a self-edge".format(spec))
+        edges.append(tuple(sorted((src, dst))))
+    return edges
+
+
+def _merge_unique_edges(*edge_lists):
+    seen = set()
+    merged = []
+    for edge_list in edge_lists:
+        for edge in edge_list:
+            edge = tuple(edge)
+            if edge in seen:
+                continue
+            seen.add(edge)
+            merged.append(edge)
+    return merged
+
+
+def _equiv_skeleton_neighbors(vertices, directed_edges, undirected_edges):
+    neighbors = {v: set() for v in vertices}
+    for src, dst in directed_edges:
+        neighbors[src].add(dst)
+        neighbors[dst].add(src)
+    for src, dst in undirected_edges:
+        neighbors[src].add(dst)
+        neighbors[dst].add(src)
+    return neighbors
+
+
+def _equiv_unshielded_colliders(vertices, directed_edges, skeleton_neighbors):
+    parents = {v: set() for v in vertices}
+    for src, dst in directed_edges:
+        parents[dst].add(src)
+
+    colliders = set()
+    for mid in vertices:
+        for left, right in itertools.combinations(sorted(parents[mid]), 2):
+            if right not in skeleton_neighbors[left]:
+                colliders.add((left, mid, right))
+    return colliders
+
+
+def _equiv_non_collider_triples(vertices, directed_edges, undirected_edges):
+    skeleton_neighbors = _equiv_skeleton_neighbors(vertices, directed_edges, undirected_edges)
+    target_colliders = _equiv_unshielded_colliders(vertices, directed_edges, skeleton_neighbors)
+    non_colliders = []
+    for mid in vertices:
+        for left, right in itertools.combinations(sorted(skeleton_neighbors[mid]), 2):
+            if right in skeleton_neighbors[left]:
+                continue
+            triple = (left, mid, right)
+            if triple not in target_colliders:
+                non_colliders.append(triple)
+    return non_colliders
+
+
+def _build_equiv_mask_constraints(equiv_class_file, graph_name):
+    spec = read_equivalence_class(equiv_class_file)
+    cg = CausalGraph.read("dat/cg/{}.cg".format(graph_name))
+    if set(spec.vertices) != set(cg.v):
+        raise ValueError(
+            "equivalence class vertices {} do not match graph {} vertices {}".format(
+                sorted(spec.vertices), graph_name, sorted(cg.v)))
+
+    directed_edges = [tuple(edge) for edge in spec.directed_edges]
+    coupled_edges = [tuple(edge) for edge in spec.undirected_edges]
+    non_collider_triples = _equiv_non_collider_triples(
+        spec.vertices, directed_edges, coupled_edges)
+    skeleton = {tuple(sorted(edge)) for edge in directed_edges}
+    skeleton.update(tuple(edge) for edge in coupled_edges)
+
+    fixed_zero_edges = []
+    for src, dst in directed_edges:
+        fixed_zero_edges.append((dst, src))
+    for src, dst in itertools.combinations(spec.vertices, 2):
+        pair = tuple(sorted((src, dst)))
+        if pair not in skeleton:
+            fixed_zero_edges.append((src, dst))
+            fixed_zero_edges.append((dst, src))
+
+    return fixed_zero_edges, directed_edges, coupled_edges, non_collider_triples
 
 
 def _parse_non_collider_triples(specs):
@@ -343,6 +446,11 @@ def main():
     bound_mode = args.bound_query
     query_track = args.query_track.lower() if args.query_track is not None and not bound_mode else None
     bound_query_track = args.bound_query_track.lower() if args.bound_query_track is not None else None
+    if bound_mode and graph_choice == "barley":
+        if args.bound_treatment == "X":
+            args.bound_treatment = "sort"
+        if args.bound_outcome == "Y":
+            args.bound_outcome = "protein"
 
     assert gen_choice in valid_generators
     assert graph_choice in valid_graphs or graph_choice in graph_sets
@@ -358,6 +466,7 @@ def main():
     assert args.theta_only_extra_lr is None or args.theta_only_extra_lr > 0
     assert args.early_stop_patience > 0
     assert args.early_stop_min_delta >= 0
+    assert args.selection_query_lambda is None or args.selection_query_lambda >= 0
     assert not (args.reuse_data_from and args.reuse_data_root)
     assert args.alm_rho_init > 0
     assert args.alm_rho_mult >= 1.0
@@ -366,6 +475,7 @@ def main():
     assert 0 < args.alm_improve_ratio <= 1.0
     assert not args.dag_alm or args.cycle_penalty == "notears"
     assert args.mask_non_collider_lambda >= 0
+    assert args.mask_fit_loss_weight >= 0
 
     pipeline = MaskedDivergencePipeline
     dat_model = valid_generators[gen_choice]
@@ -383,6 +493,11 @@ def main():
         learn_mask = False
     elif args.learn_mask:
         learn_mask = True
+
+    manual_fixed_zero_edges = _parse_fixed_zero_edges(args.mask_fixed_zero)
+    manual_fixed_one_edges = _parse_fixed_one_edges(args.mask_fixed_one)
+    manual_coupled_edges = _parse_coupled_edges(args.mask_coupled_edge)
+    manual_non_collider_triples = _parse_non_collider_triples(args.mask_non_collider)
 
     hyperparams = {
         'lr': args.lr,
@@ -412,15 +527,18 @@ def main():
         'mask-init-mode': args.mask_init_mode,
         'mask-init-value': args.mask_init_value,
         'mask-init-range': (args.mask_init_low, args.mask_init_high),
-        'mask-fixed-zero-edges': _parse_fixed_zero_edges(args.mask_fixed_zero),
-        'mask-fixed-one-edges': _parse_fixed_one_edges(args.mask_fixed_one),
+        'mask-fixed-zero-edges': manual_fixed_zero_edges,
+        'mask-fixed-one-edges': manual_fixed_one_edges,
+        'mask-coupled-edges': manual_coupled_edges,
+        'mask-equiv-class-file': args.mask_equiv_class_file,
         'cycle-lambda': args.cycle_lambda,
         'cycle-penalty': args.cycle_penalty,
         'dagma-s': args.dagma_s,
         'mask-l1-lambda': args.mask_l1_lambda,
         'mask-binary-lambda': args.mask_binary_lambda,
-        'mask-non-collider-triples': _parse_non_collider_triples(args.mask_non_collider),
+        'mask-non-collider-triples': manual_non_collider_triples,
         'mask-non-collider-lambda': args.mask_non_collider_lambda,
+        'mask-fit-loss-weight': args.mask_fit_loss_weight,
         'dag-alm': args.dag_alm,
         'alm-alpha-init': args.alm_alpha_init,
         'alm-rho-init': args.alm_rho_init,
@@ -439,6 +557,11 @@ def main():
         'early-stop-min-delta': args.early_stop_min_delta,
         'max-lambda': args.max_lambda,
         'min-lambda': args.min_lambda,
+        'selection-query-lambda': (
+            args.selection_query_lambda
+            if args.selection_query_lambda is not None
+            else args.min_lambda
+        ),
         'mc-sample-size': args.mc_sample_size,
         'query-update-target': args.query_update_target,
     }
@@ -496,6 +619,29 @@ def main():
         trial_indices = range(args.n_trials)
 
     for graph in graph_set:
+        graph_fixed_zero_edges = list(manual_fixed_zero_edges)
+        graph_fixed_one_edges = list(manual_fixed_one_edges)
+        graph_coupled_edges = list(manual_coupled_edges)
+        graph_non_collider_triples = list(manual_non_collider_triples)
+        if args.mask_equiv_class_file:
+            (
+                equiv_fixed_zero,
+                equiv_fixed_one,
+                equiv_coupled,
+                equiv_non_colliders,
+            ) = _build_equiv_mask_constraints(
+                args.mask_equiv_class_file, graph)
+            graph_fixed_zero_edges = _merge_unique_edges(graph_fixed_zero_edges, equiv_fixed_zero)
+            graph_fixed_one_edges = _merge_unique_edges(graph_fixed_one_edges, equiv_fixed_one)
+            graph_coupled_edges = _merge_unique_edges(graph_coupled_edges, equiv_coupled)
+            graph_non_collider_triples = _merge_unique_edges(
+                graph_non_collider_triples, equiv_non_colliders)
+
+        hyperparams['mask-fixed-zero-edges'] = graph_fixed_zero_edges
+        hyperparams['mask-fixed-one-edges'] = graph_fixed_one_edges
+        hyperparams['mask-coupled-edges'] = graph_coupled_edges
+        hyperparams['mask-non-collider-triples'] = graph_non_collider_triples
+
         do_var_list = get_experimental_variables(graph)
         if bound_mode:
             if bound_query_track is not None:
