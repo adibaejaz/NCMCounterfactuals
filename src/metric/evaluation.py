@@ -161,6 +161,13 @@ def _adjustment_domain_events(truth, adjustment_vars):
         yield dict(zip(adjustment_vars, adjustment_values))
 
 
+def _finite_bounds(values):
+    finite_values = [v for v in values if not np.isnan(v)]
+    if not finite_values:
+        return float("nan"), float("nan")
+    return min(finite_values), max(finite_values)
+
+
 def _chain_query_bound_metrics(
         metrics,
         truth,
@@ -182,11 +189,12 @@ def _chain_query_bound_metrics(
         metrics, stored, cond_key, truth, outcome_event, n, truth_kwargs,
         given={treatment_var: treatment_value})
 
+    lower, upper = _finite_bounds([p_y, p_y_given_t])
     return {
         "marginal": p_y,
         "conditional": p_y_given_t,
-        "lower": min(p_y, p_y_given_t),
-        "upper": max(p_y, p_y_given_t),
+        "lower": lower,
+        "upper": upper,
     }
 
 
@@ -212,42 +220,28 @@ def _backdoor_query_bound_metrics(
         truth_kwargs,
         stored)
 
-    adjusted = 0.0
-    for adjustment_value in (0, 1):
-        adjust_key = "true_{}".format(serialize_probability({adjustment_var: adjustment_value}))
-        p_adjust = _metric_event_probability(
-            metrics,
-            stored,
-            adjust_key,
-            truth,
-            {adjustment_var: adjustment_value},
-            n,
-            truth_kwargs)
-
-        cond_key = "true_{}".format(serialize_probability(
-            outcome_event,
-            cond_vals={treatment_var: treatment_value, adjustment_var: adjustment_value}))
-        p_y_given_t_adjust = _metric_event_probability(
-            metrics,
-            stored,
-            cond_key,
-            truth,
-            outcome_event,
-            n,
-            truth_kwargs,
-            given={treatment_var: treatment_value, adjustment_var: adjustment_value})
-        adjusted += p_y_given_t_adjust * p_adjust
-
     adjusted_key = "true_adjusted_{}".format(do_name)
-    metrics[adjusted_key] = adjusted
+    adjusted = _adjusted_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        (adjustment_var,),
+        do_name,
+        n,
+        truth_kwargs,
+        stored,
+        adjusted_key=adjusted_key)
 
     values = [candidates["marginal"], candidates["conditional"], adjusted]
+    lower, upper = _finite_bounds(values)
     return {
         "marginal": candidates["marginal"],
         "conditional": candidates["conditional"],
         "adjusted": adjusted,
-        "lower": min(values),
-        "upper": max(values),
+        "lower": lower,
+        "upper": upper,
     }
 
 
@@ -284,7 +278,8 @@ def _adjusted_query_candidate(
         do_name,
         n,
         truth_kwargs,
-        stored):
+        stored,
+        adjusted_key=None):
     adjusted = 0.0
     adjustment_vars = tuple(adjustment_vars)
     sample_kwargs = truth_kwargs if truth_kwargs is not None else dict()
@@ -319,7 +314,8 @@ def _adjusted_query_candidate(
             continue
         adjusted += p_y_given_t_adjust * p_adjust
 
-    adjusted_key = "true_adjusted_{}_{}".format("_".join(adjustment_vars), do_name)
+    if adjusted_key is None:
+        adjusted_key = "true_adjusted_{}_{}".format("_".join(adjustment_vars), do_name)
     metrics[adjusted_key] = adjusted
     return adjusted
 
@@ -383,12 +379,13 @@ def _square_query_bound_metrics(
         stored)
 
     values = [x_conditional, z_adjusted, w_adjusted]
+    lower, upper = _finite_bounds(values)
     return {
         "conditional_x": x_conditional,
         "adjusted_z": z_adjusted,
         "adjusted_w": w_adjusted,
-        "lower": min(values),
-        "upper": max(values),
+        "lower": lower,
+        "upper": upper,
     }
 
 
@@ -453,14 +450,15 @@ def _four_clique_query_bound_metrics(
         z_adjusted,
         w_adjusted,
     ]
+    lower, upper = _finite_bounds(values)
     return {
         "marginal": candidates["marginal"],
         "conditional": candidates["conditional"],
         "adjusted_zw": zw_adjusted,
         "adjusted_z": z_adjusted,
         "adjusted_w": w_adjusted,
-        "lower": min(values),
-        "upper": max(values),
+        "lower": lower,
+        "upper": upper,
     }
 
 
@@ -503,13 +501,7 @@ def _sachs_query_bound_metrics(
         bound["adjusted_{}".format("_".join(adjustment_vars))] = adjusted
         values.append(adjusted)
 
-    finite_values = [v for v in values if not np.isnan(v)]
-    if finite_values:
-        bound["lower"] = min(finite_values)
-        bound["upper"] = max(finite_values)
-    else:
-        bound["lower"] = float("nan")
-        bound["upper"] = float("nan")
+    bound["lower"], bound["upper"] = _finite_bounds(values)
     return bound
 
 
@@ -558,12 +550,13 @@ def _barley_query_bound_metrics(
         stored)
 
     values = [srtprot_adjusted, sorttkv_adjusted, srtsize_adjusted]
+    lower, upper = _finite_bounds(values)
     return {
         "adjusted_srtprot": srtprot_adjusted,
         "adjusted_sorttkv": sorttkv_adjusted,
         "adjusted_srtsize": srtsize_adjusted,
-        "lower": min(values),
-        "upper": max(values),
+        "lower": lower,
+        "upper": upper,
     }
 
 

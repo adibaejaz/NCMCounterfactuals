@@ -301,6 +301,28 @@ def _append_jsonl(path, obj):
         file.write(json.dumps(obj, sort_keys=True) + "\n")
 
 
+def _read_rejected_retry_indices(path):
+    retry_indices = set()
+    if not os.path.isfile(path):
+        return retry_indices
+
+    with open(path) as file:
+        for line_number, line in enumerate(file, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "invalid JSON in rejected candidate log {} at line {}".format(
+                        path, line_number)) from exc
+            retry_index = row.get("retry_index")
+            if retry_index is not None:
+                retry_indices.add(int(retry_index))
+    return retry_indices
+
+
 def _save_accepted(
         out_dir,
         graph,
@@ -389,8 +411,15 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
     reject_log = os.path.join(out_dir, "rejected_candidates.jsonl")
     if args.overwrite and os.path.isfile(reject_log):
         os.remove(reject_log)
+    rejected_retry_indices = set() if args.overwrite else _read_rejected_retry_indices(reject_log)
+    if rejected_retry_indices:
+        print("[resume] graph={} trial={} skipping {} rejected retries from {}".format(
+            args.graph, trial_index, len(rejected_retry_indices), reject_log))
 
     for retry_index in range(args.max_retries + 1):
+        if retry_index in rejected_retry_indices:
+            continue
+
         seed = _candidate_seed(args, trial_index, retry_index, hyperparams, do_var_list)
         print("[candidate] graph={} trial={} retry={} seed={}".format(
             args.graph, trial_index, retry_index, seed))

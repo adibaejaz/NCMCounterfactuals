@@ -23,6 +23,10 @@ def check_equal(input, val):
     if T.is_tensor(val):
         return T.all(T.eq(input, T.tile(val, (input.shape[0], 1))), dim=1).bool()
     else:
+        if input.ndim > 1 and input.shape[1] != 1:
+            raise ValueError(
+                "cannot compare vector-valued variable with shape {} to scalar value {}; "
+                "pass a full binary vector instead".format(tuple(input.shape), val))
         return T.squeeze(input == val)
 
 def soft_equals(input, val):
