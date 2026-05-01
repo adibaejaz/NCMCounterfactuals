@@ -207,6 +207,20 @@ def _adjustment_query_sets(graph_name):
         return (("Z",), ("W",))
     if graph_name == "four_clique":
         return (("Z", "W"), ("Z",), ("W",))
+    if graph_name == "sachs":
+        return (
+            ("Raf",),
+            ("PKA",),
+            ("Mek",),
+            ("Raf", "PKA"),
+            ("Raf", "Mek"),
+            ("PKA", "Mek"),
+            ("Raf", "PKA", "Mek"),
+            ("Jnk",),
+            ("PKA", "Jnk"),
+            ("P38",),
+            ("PKA", "P38"),
+        )
     if graph_name == "barley":
         return (("srtprot",), ("sorttkv",), ("srtsize",))
     return ()

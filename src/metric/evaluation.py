@@ -324,6 +324,22 @@ def _adjusted_query_candidate(
     return adjusted
 
 
+def _sachs_adjustment_query_sets():
+    return (
+        ("Raf",),
+        ("PKA",),
+        ("Mek",),
+        ("Raf", "PKA"),
+        ("Raf", "Mek"),
+        ("PKA", "Mek"),
+        ("Raf", "PKA", "Mek"),
+        ("Jnk",),
+        ("PKA", "Jnk"),
+        ("P38",),
+        ("PKA", "P38"),
+    )
+
+
 def _square_query_bound_metrics(
         metrics,
         truth,
@@ -448,6 +464,55 @@ def _four_clique_query_bound_metrics(
     }
 
 
+def _sachs_query_bound_metrics(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        do_name,
+        n,
+        truth_kwargs,
+        stored):
+    conditional = _conditional_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        n,
+        truth_kwargs,
+        stored)
+
+    bound = {
+        "conditional": conditional,
+    }
+    values = [conditional]
+    for adjustment_vars in _sachs_adjustment_query_sets():
+        adjusted = _adjusted_query_candidate(
+            metrics,
+            truth,
+            outcome_event,
+            treatment_var,
+            treatment_value,
+            adjustment_vars,
+            do_name,
+            n,
+            truth_kwargs,
+            stored)
+        bound["adjusted_{}".format("_".join(adjustment_vars))] = adjusted
+        values.append(adjusted)
+
+    finite_values = [v for v in values if not np.isnan(v)]
+    if finite_values:
+        bound["lower"] = min(finite_values)
+        bound["upper"] = max(finite_values)
+    else:
+        bound["lower"] = float("nan")
+        bound["upper"] = float("nan")
+    return bound
+
+
 def _barley_query_bound_metrics(
         metrics,
         truth,
@@ -550,6 +615,17 @@ def scm_query_bound_metrics(
                 stored)
         elif graph_name == "four_clique":
             bound = _four_clique_query_bound_metrics(
+                metrics,
+                truth,
+                outcome_event,
+                treatment_var,
+                treatment_value,
+                do_name,
+                n,
+                truth_kwargs,
+                stored)
+        elif graph_name == "sachs":
+            bound = _sachs_query_bound_metrics(
                 metrics,
                 truth,
                 outcome_event,
