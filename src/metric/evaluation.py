@@ -133,7 +133,7 @@ def event_probability(m=None, event=None, given=None, n=1000000, do=None, dat=No
     return (match.float().sum() / match_count).item()
 
 
-def _metric_event_probability(metrics, stored, key, truth, event, n, truth_kwargs, given=None):
+def _metric_event_probability(metrics, stored, key, truth, event, n, truth_kwargs, given=None, dat=None):
     if key not in metrics:
         if stored is not None and key in stored:
             metrics[key] = stored[key]
@@ -143,8 +143,22 @@ def _metric_event_probability(metrics, stored, key, truth, event, n, truth_kwarg
                 event=event,
                 given=given,
                 n=n,
+                dat=dat,
                 model_kwargs=truth_kwargs)
     return metrics[key]
+
+
+def _adjustment_domain_events(truth, adjustment_vars):
+    if hasattr(truth, "space") and hasattr(truth, "v_size"):
+        for event in truth.space(truth.v_size, select=adjustment_vars):
+            yield {
+                k: v.detach().cpu() if T.is_tensor(v) else v
+                for (k, v) in event.items()
+            }
+        return
+
+    for adjustment_values in itertools.product((0, 1), repeat=len(adjustment_vars)):
+        yield dict(zip(adjustment_vars, adjustment_values))
 
 
 def _chain_query_bound_metrics(
@@ -273,8 +287,9 @@ def _adjusted_query_candidate(
         stored):
     adjusted = 0.0
     adjustment_vars = tuple(adjustment_vars)
-    for adjustment_values in itertools.product((0, 1), repeat=len(adjustment_vars)):
-        adjustment_event = dict(zip(adjustment_vars, adjustment_values))
+    sample_kwargs = truth_kwargs if truth_kwargs is not None else dict()
+    dat = truth(n, evaluating=True, **sample_kwargs)
+    for adjustment_event in _adjustment_domain_events(truth, adjustment_vars):
         adjust_key = "true_{}".format(serialize_probability(adjustment_event))
         p_adjust = _metric_event_probability(
             metrics,
@@ -283,7 +298,8 @@ def _adjusted_query_candidate(
             truth,
             adjustment_event,
             n,
-            truth_kwargs)
+            truth_kwargs,
+            dat=dat)
 
         cond_vals = {treatment_var: treatment_value, **adjustment_event}
         cond_key = "true_{}".format(serialize_probability(
@@ -297,7 +313,10 @@ def _adjusted_query_candidate(
             outcome_event,
             n,
             truth_kwargs,
-            given=cond_vals)
+            given=cond_vals,
+            dat=dat)
+        if np.isnan(p_y_given_t_adjust):
+            continue
         adjusted += p_y_given_t_adjust * p_adjust
 
     adjusted_key = "true_adjusted_{}_{}".format("_".join(adjustment_vars), do_name)
