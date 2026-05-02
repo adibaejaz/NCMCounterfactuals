@@ -44,6 +44,7 @@ VALID_GRAPHS = {
     "gid_a", "gid_b", "gid_c", "gid_d",
     "med_c1", "med_c2",
     "expl_xm", "expl_xm_dox", "expl_xy", "expl_dox", "expl_xy_dox", "expl_my", "expl_my_dox",
+    "sachs"
 }
 
 
@@ -79,6 +80,26 @@ def _dimension_label(dim, v_sizes=None):
 def _generated_dataset_dir(root_dir, graph, n, dim, trial_index, v_sizes=None):
     return Path(root_dir) / "graph={}-n_samples={}-dim={}-trial_index={}".format(
         graph, n, _dimension_label(dim, v_sizes), trial_index)
+
+
+def _find_generated_dataset_dir(root_dir, graph, n, dim, trial_index, v_sizes=None):
+    exact = _generated_dataset_dir(root_dir, graph, n, dim, trial_index, v_sizes)
+    if exact.is_dir():
+        return exact
+
+    pattern = "graph={}-n_samples={}-dim={}*-trial_index={}".format(
+        graph, n, dim, trial_index)
+    matches = sorted(
+        path for path in Path(root_dir).glob(pattern)
+        if path.is_dir() and (path / "data_metadata.json").is_file()
+    )
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            "multiple generated datasets match {} under {}: {}".format(
+                pattern, root_dir, [str(path) for path in matches]))
+    return None
 
 
 def _coerce_generated_hyperparams(raw_hyperparams):
@@ -176,12 +197,18 @@ def _resolve_data_bundle(args, graph, n, dim, trial_index, hyperparams, dat_mode
         return _load_saved_data_bundle(source, dat_model, cg_file, dim, hyperparams, data_seed)
 
     if args.reuse_data_root:
-        generated_source = _generated_dataset_dir(
+        generated_source = _find_generated_dataset_dir(
             args.reuse_data_root, graph, n, dim, trial_index, hyperparams.get("v-sizes"))
-        if generated_source.is_dir():
+        if generated_source is not None:
             return _load_generated_data_bundle(generated_source, graph, dim, hyperparams)
-        run_source = _find_run_reuse_source(
-            args.reuse_data_root, graph, n, dim, trial_index, args.train_seed_offset)
+        try:
+            run_source = _find_run_reuse_source(
+                args.reuse_data_root, graph, n, dim, trial_index, args.train_seed_offset)
+        except ValueError as exc:
+            raise ValueError(
+                "no generated dataset found under {} for graph={}, n={}, dim={}, trial_index={}; "
+                "also failed saved-run lookup: {}".format(
+                    args.reuse_data_root, graph, n, dim, trial_index, exc)) from exc
         return _load_saved_data_bundle(run_source, dat_model, cg_file, dim, hyperparams, data_seed)
 
     return build_data_bundle(dat_model, cg_file, n, dim, hyperparams, data_seed), data_seed
