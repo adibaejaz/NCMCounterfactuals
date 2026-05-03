@@ -1,0 +1,31 @@
+<NODES>
+Akt
+Erk
+PKA
+Mek
+Jnk
+PKC
+Raf
+P38
+PIP2
+PIP3
+Plcg
+
+<EDGES>
+Erk -> Akt
+Mek -> Erk
+Mek -> PKA
+Mek -> Raf
+PKA -> Akt
+PKA -> Erk
+PKA -> Jnk
+PKA -> P38
+PKA -> Raf
+PKC -> Jnk
+PKC -> Mek
+PKC -> P38
+PKC -> PKA
+PKC -> Raf
+PIP3 -> PIP2
+Plcg -> PIP2
+Plcg -> PIP3

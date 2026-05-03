@@ -12,6 +12,9 @@ PLOT_RIGHT = 0.85
 X_LABEL_PAD = 132
 STANDARD_GROUP_SPACING = 1.0
 NONSTANDARD_GROUP_SPACING = 1.45
+POOL_NONE = "none"
+POOL_ENDPOINTS = "endpoints"
+POOL_ALL_OUTPUTS = "all-outputs"
 
 
 def _find_results_files(root_dir):
@@ -53,6 +56,13 @@ def _extract_graph(run_dir):
     for piece in run_dir.split("-"):
         if piece.startswith("graph="):
             return piece[len("graph="):]
+    return "?"
+
+
+def _extract_dimension_label(run_dir):
+    for piece in run_dir.split("-"):
+        if piece.startswith("dim="):
+            return piece[len("dim="):]
     return "?"
 
 
@@ -99,14 +109,59 @@ def _format_float(value):
     return f"{value:g}"
 
 
+def _format_optional(value):
+    if value in (None, "", "None"):
+        return "?"
+    return str(value)
+
+
+def _format_init_label(mode, value, init_range):
+    mode = _format_optional(mode)
+    value = _format_optional(value)
+    init_range = _format_optional(init_range)
+    if value != "?":
+        return f"{mode}:{value}"
+    if init_range != "?":
+        return f"{mode}:{init_range}"
+    return mode
+
+
+def _format_coupling_label(coupled_edges):
+    if coupled_edges in (None, "", "[]", "None"):
+        return "off"
+    return "on"
+
+
+def _cycle_query_lambda_label(cycle_lambda, min_lambda, max_lambda):
+    return " ".join([
+        f"c={_format_float(cycle_lambda)}",
+        f"qmin={_format_float(min_lambda)}",
+        f"qmax={_format_float(max_lambda)}",
+    ])
+
+
 def _group_label(group):
     cycle_lambda, mask_mode, _trial_index, max_lambda, min_lambda = group[:5]
     lines = [
         str(mask_mode),
-        f"c={_format_float(cycle_lambda)}",
+        _cycle_query_lambda_label(cycle_lambda, min_lambda, max_lambda),
     ]
     if len(group) > 5:
-        alt_opt, dag_alm, theta_lr, mask_lr, theta_steps, mask_steps = group[5:]
+        (
+            alt_opt,
+            dag_alm,
+            theta_lr,
+            mask_lr,
+            theta_steps,
+            mask_steps,
+            mask_init_mode,
+            mask_init_value,
+            mask_init_range,
+            mask_fit_loss_weight,
+            mask_coupled_edges,
+            query_update_target,
+            selection_query_lambda,
+        ) = group[5:]
         parts = []
         if alt_opt:
             parts.append("alt")
@@ -118,6 +173,19 @@ def _group_label(group):
             f"s={theta_steps}:{mask_steps}",
         ])
         lines.append(" ".join(parts))
+        lines.append(
+            " ".join([
+                f"init={_format_init_label(mask_init_mode, mask_init_value, mask_init_range)}",
+                f"mfit={_format_float(mask_fit_loss_weight)}",
+            ])
+        )
+        lines.append(
+            " ".join([
+                f"coup={_format_coupling_label(mask_coupled_edges)}",
+                f"q={_format_optional(query_update_target)}",
+                f"sel={_format_float(selection_query_lambda)}",
+            ])
+        )
     return "\n".join(lines)
 
 
@@ -135,6 +203,27 @@ def _row_offsets(rows, max_span=0.62):
 
 def _group_spacing(include_nonstandard=False):
     return NONSTANDARD_GROUP_SPACING if include_nonstandard else STANDARD_GROUP_SPACING
+
+
+def _pooled_bound_values(group_rows, pool_train_seeds):
+    if pool_train_seeds == POOL_NONE:
+        return None
+
+    if pool_train_seeds == POOL_ENDPOINTS:
+        return (
+            min(row["ncm_min"] for row in group_rows),
+            max(row["ncm_max"] for row in group_rows),
+        )
+
+    if pool_train_seeds == POOL_ALL_OUTPUTS:
+        values = [
+            value
+            for row in group_rows
+            for value in (row["ncm_min"], row["ncm_max"])
+        ]
+        return min(values), max(values)
+
+    raise ValueError(f"unknown pooling mode: {pool_train_seeds}")
 
 
 def _standard_rows(rows):
@@ -164,6 +253,7 @@ def _filter_rows(
         rows,
         include_nonstandard=False,
         graph_names=None,
+        dimension_labels=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -178,6 +268,8 @@ def _filter_rows(
     narrowed = []
     for row in filtered:
         if not _matches_any(row["graph"], graph_names):
+            continue
+        if not _matches_any(row["dimension_label"], dimension_labels):
             continue
         if not _matches_any(row["train_seed_offset"], train_seed_offsets):
             continue
@@ -199,6 +291,7 @@ def _filter_rows(
 
 def _filter_label(
         graph_names=None,
+        dimension_labels=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -208,6 +301,8 @@ def _filter_label(
     filters = []
     if graph_names:
         filters.append(f"graph={','.join(str(graph) for graph in graph_names)}")
+    if dimension_labels:
+        filters.append(f"dim={','.join(str(dim) for dim in dimension_labels)}")
     if train_seed_offsets:
         filters.append(f"seed={','.join(str(offset) for offset in train_seed_offsets)}")
     if theta_lr is not None:
@@ -245,9 +340,23 @@ def _group_rows(rows, include_nonstandard=False):
                 row["mask_lr"],
                 row["theta_steps_per_mask"],
                 row["mask_steps_per_theta"],
+                row["mask_init_mode"],
+                row["mask_init_value"],
+                row["mask_init_range"],
+                row["mask_fit_loss_weight"],
+                row["mask_coupled_edges"],
+                row["query_update_target"],
+                row["selection_query_lambda"],
             )
         grouped.setdefault(group, []).append(row)
     return grouped
+
+
+def _available_graphs(rows, graph_names=None):
+    return sorted({
+        row["graph"] for row in rows
+        if _matches_any(row["graph"], graph_names)
+    })
 
 
 def _sort_groups(groups):
@@ -400,6 +509,7 @@ def load_bound_results(root_dir):
             "label": _extract_run_label(results_path, root),
             "run_id": _extract_run_id(run_dir),
             "graph": _extract_graph(run_dir),
+            "dimension_label": _extract_dimension_label(run_dir),
             "trial_index": _extract_trial_index(run_dir),
             "cycle_lambda": _as_float(hyperparams.get("cycle-lambda")),
             "max_lambda": _as_float(hyperparams.get("max-lambda")),
@@ -413,6 +523,13 @@ def load_bound_results(root_dir):
             "mask_lr": _as_float(hyperparams.get("mask-lr")),
             "theta_steps_per_mask": hyperparams.get("theta-steps-per-mask", "?"),
             "mask_steps_per_theta": hyperparams.get("mask-steps-per-theta", "?"),
+            "mask_init_mode": hyperparams.get("mask-init-mode"),
+            "mask_init_value": _as_float(hyperparams.get("mask-init-value")),
+            "mask_init_range": hyperparams.get("mask-init-range"),
+            "mask_fit_loss_weight": _as_float(hyperparams.get("mask-fit-loss-weight")),
+            "mask_coupled_edges": hyperparams.get("mask-coupled-edges"),
+            "query_update_target": hyperparams.get("query-update-target"),
+            "selection_query_lambda": _as_float(hyperparams.get("selection-query-lambda")),
             "standard_bound_run": _standard_bound_run(hyperparams),
             "results_path": str(results_path),
             **series,
@@ -424,42 +541,26 @@ def load_bound_results(root_dir):
     return rows
 
 
-def plot_bound_results(
+def _plot_bound_rows_on_ax(
+        ax,
+        rows,
         root_dir,
-        output_path=None,
-        title=None,
-        figsize=None,
         include_nonstandard=False,
         graph_names=None,
+        dimension_labels=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
         theta_steps_per_mask=None,
         mask_steps_per_theta=None,
-        schedule_filters=None):
-    rows = _filter_rows(
-        load_bound_results(root_dir),
-        include_nonstandard=include_nonstandard,
-        graph_names=graph_names,
-        train_seed_offsets=train_seed_offsets,
-        theta_lr=theta_lr,
-        mask_lr=mask_lr,
-        theta_steps_per_mask=theta_steps_per_mask,
-        mask_steps_per_theta=mask_steps_per_theta,
-        schedule_filters=schedule_filters,
-    )
-    if not rows:
-        raise ValueError(f"No completed bound results found under {root_dir}")
-
+        schedule_filters=None,
+        pool_train_seeds=POOL_NONE,
+        title=None,
+        show_legend=True,
+        show_title=True):
     grouped = _group_rows(rows, include_nonstandard=include_nonstandard)
     groups = _sort_groups(grouped)
     n_runs = len(groups)
-    if figsize is None:
-        width_per_run = 1.05 if include_nonstandard else 0.75
-        height = 8 if include_nonstandard else 6
-        figsize = (max(12, width_per_run * n_runs), height)
-
-    fig, ax = plt.subplots(figsize=figsize)
 
     true_color = "#1f77b4"
     ncm_min_color = "#d62728"
@@ -491,35 +592,75 @@ def plot_bound_results(
 
         offsets = _row_offsets(group_rows)
 
-        for offset, row in zip(offsets, group_rows):
-            ax.scatter(
-                [x + offset],
-                [row["ncm_min"]],
-                color=ncm_min_color,
-                marker="o",
-                s=34,
-                edgecolors="black",
-                linewidths=0.3,
-                zorder=4,
-            )
-            ax.scatter(
-                [x + offset],
-                [row["ncm_max"]],
-                color=ncm_max_color,
-                marker="o",
-                s=34,
-                edgecolors="black",
-                linewidths=0.3,
-                zorder=4,
-            )
+        pooled_values = _pooled_bound_values(group_rows, pool_train_seeds)
+        if pooled_values is None:
+            for offset, row in zip(offsets, group_rows):
+                ax.scatter([x + offset], [row["ncm_min"]], color=ncm_min_color, marker="o", s=34,
+                           edgecolors="black", linewidths=0.3, zorder=4)
+                ax.scatter([x + offset], [row["ncm_max"]], color=ncm_max_color, marker="o", s=34,
+                           edgecolors="black", linewidths=0.3, zorder=4)
+        else:
+            pooled_min, pooled_max = pooled_values
+            ax.scatter([x], [pooled_min], color=ncm_min_color, marker="D", s=46,
+                       edgecolors="black", linewidths=0.4, zorder=4)
+            ax.scatter([x], [pooled_max], color=ncm_max_color, marker="D", s=46,
+                       edgecolors="black", linewidths=0.4, zorder=4)
 
     ax.set_xlim(-0.8 * spacing, xs[-1] + 0.8 * spacing)
     ax.set_xticks(xs)
     ax.set_xticklabels([_group_label(group) for group in groups], rotation=45, ha="right", fontsize=8)
-    ax.set_xlabel("Cycle lambda / mask mode, grouped by trial", labelpad=X_LABEL_PAD)
+    ax.set_xlabel("Cycle lambda / query min-max lambda / mask mode, grouped by trial", labelpad=X_LABEL_PAD)
     ax.set_ylabel("Query value")
-    filter_label = _filter_label(
+    if show_title:
+        filter_label = _filter_label(
+            graph_names=graph_names,
+            dimension_labels=dimension_labels,
+            train_seed_offsets=train_seed_offsets,
+            theta_lr=theta_lr,
+            mask_lr=mask_lr,
+            theta_steps_per_mask=theta_steps_per_mask,
+            mask_steps_per_theta=mask_steps_per_theta,
+            schedule_filters=schedule_filters,
+        )
+        ax.set_title(title or f"True Bounds and NCM Seed Results ({Path(root_dir)}){filter_label}")
+    ax.grid(axis="y", alpha=0.3, zorder=1)
+    _add_trial_labels(ax, trial_groups)
+
+    legend_handles = [
+        Line2D([0], [0], color=true_color, lw=4.0, label="True min/max"),
+        Line2D([0], [0], marker="D" if pool_train_seeds != POOL_NONE else "o",
+               color="black", markerfacecolor=ncm_min_color,
+               linestyle="", markersize=7, label="Pooled NCM min" if pool_train_seeds != POOL_NONE else "NCM min"),
+        Line2D([0], [0], marker="D" if pool_train_seeds != POOL_NONE else "o",
+               color="black", markerfacecolor=ncm_max_color,
+               linestyle="", markersize=7, label="Pooled NCM max" if pool_train_seeds != POOL_NONE else "NCM max"),
+    ]
+    if show_legend:
+        ax.legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)
+    return legend_handles
+
+
+def plot_bound_results(
+        root_dir,
+        output_path=None,
+        title=None,
+        figsize=None,
+        include_nonstandard=False,
+        graph_names=None,
+        dimension_labels=None,
+        train_seed_offsets=None,
+        theta_lr=None,
+        mask_lr=None,
+        theta_steps_per_mask=None,
+        mask_steps_per_theta=None,
+        schedule_filters=None,
+        subplot_graphs=False,
+        pool_train_seeds=POOL_NONE):
+    rows = _filter_rows(
+        load_bound_results(root_dir),
+        include_nonstandard=include_nonstandard,
         graph_names=graph_names,
+        dimension_labels=dimension_labels,
         train_seed_offsets=train_seed_offsets,
         theta_lr=theta_lr,
         mask_lr=mask_lr,
@@ -527,29 +668,89 @@ def plot_bound_results(
         mask_steps_per_theta=mask_steps_per_theta,
         schedule_filters=schedule_filters,
     )
-    ax.set_title(title or f"True Bounds and NCM Seed Results ({Path(root_dir)}){filter_label}")
-    ax.grid(axis="y", alpha=0.3, zorder=1)
+    if not rows:
+        raise ValueError(f"No completed bound results found under {root_dir}")
 
-    _add_trial_labels(ax, trial_groups)
+    if subplot_graphs:
+        graphs = _available_graphs(rows, graph_names=graph_names)
+        graph_rows = [(graph, [row for row in rows if row["graph"] == graph]) for graph in graphs]
+        max_groups = max(
+            len(_group_rows(cur_rows, include_nonstandard=include_nonstandard))
+            for _graph, cur_rows in graph_rows
+        )
+        if figsize is None:
+            width_per_run = 1.05 if include_nonstandard else 0.75
+            height_per_graph = 6 if include_nonstandard else 5
+            figsize = (max(12, width_per_run * max_groups), max(6, height_per_graph * len(graph_rows)))
 
-    ax.legend(
-        handles=[
-            Line2D([0], [0], color=true_color, lw=4.0, label="True min/max"),
-            Line2D([0], [0], marker="o", color="black", markerfacecolor=ncm_min_color,
-                   linestyle="", markersize=7, label="NCM min"),
-            Line2D([0], [0], marker="o", color="black", markerfacecolor=ncm_max_color,
-                   linestyle="", markersize=7, label="NCM max"),
-        ],
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.0),
-        borderaxespad=0.0,
+        fig, axes = plt.subplots(len(graph_rows), 1, figsize=figsize, squeeze=False)
+        legend_handles = None
+        for ax, (graph, cur_rows) in zip(axes[:, 0], graph_rows):
+            legend_handles = _plot_bound_rows_on_ax(
+                ax,
+                cur_rows,
+                root_dir,
+                include_nonstandard=include_nonstandard,
+                graph_names=[graph],
+                dimension_labels=dimension_labels,
+                train_seed_offsets=train_seed_offsets,
+                theta_lr=theta_lr,
+                mask_lr=mask_lr,
+                theta_steps_per_mask=theta_steps_per_mask,
+                mask_steps_per_theta=mask_steps_per_theta,
+                schedule_filters=schedule_filters,
+                pool_train_seeds=pool_train_seeds,
+                title=f"Graph: {graph}",
+                show_legend=False,
+            )
+
+        filter_label = _filter_label(
+            graph_names=graph_names,
+            dimension_labels=dimension_labels,
+            train_seed_offsets=train_seed_offsets,
+            theta_lr=theta_lr,
+            mask_lr=mask_lr,
+            theta_steps_per_mask=theta_steps_per_mask,
+            mask_steps_per_theta=mask_steps_per_theta,
+            schedule_filters=schedule_filters,
+        )
+        fig.suptitle(title or f"True Bounds and NCM Seed Results ({Path(root_dir)}){filter_label}")
+        fig.legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(PLOT_RIGHT + 0.02, 0.96), borderaxespad=0.0)
+        fig.subplots_adjust(bottom=PLOT_BOTTOM / len(graph_rows), right=PLOT_RIGHT, hspace=0.9)
+
+        if output_path is not None:
+            fig.savefig(output_path, dpi=300, bbox_inches="tight")
+        return fig, axes[:, 0]
+
+    grouped = _group_rows(rows, include_nonstandard=include_nonstandard)
+    groups = _sort_groups(grouped)
+    n_runs = len(groups)
+    if figsize is None:
+        width_per_run = 1.05 if include_nonstandard else 0.75
+        height = 8 if include_nonstandard else 6
+        figsize = (max(12, width_per_run * n_runs), height)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    _plot_bound_rows_on_ax(
+        ax,
+        rows,
+        root_dir,
+        include_nonstandard=include_nonstandard,
+        graph_names=graph_names,
+        dimension_labels=dimension_labels,
+        train_seed_offsets=train_seed_offsets,
+        theta_lr=theta_lr,
+        mask_lr=mask_lr,
+        theta_steps_per_mask=theta_steps_per_mask,
+        mask_steps_per_theta=mask_steps_per_theta,
+        schedule_filters=schedule_filters,
+        pool_train_seeds=pool_train_seeds,
+        title=title,
     )
-
     fig.subplots_adjust(bottom=PLOT_BOTTOM, right=PLOT_RIGHT)
 
     if output_path is not None:
         fig.savefig(output_path, dpi=300, bbox_inches="tight")
-
     return fig, ax
 
 
@@ -560,6 +761,7 @@ def plot_kl_results(
         figsize=None,
         include_nonstandard=False,
         graph_names=None,
+        dimension_labels=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -571,6 +773,7 @@ def plot_kl_results(
             load_bound_results(root_dir),
             include_nonstandard=include_nonstandard,
             graph_names=graph_names,
+            dimension_labels=dimension_labels,
             train_seed_offsets=train_seed_offsets,
             theta_lr=theta_lr,
             mask_lr=mask_lr,
@@ -659,6 +862,7 @@ def plot_kl_results(
 
     filter_label = _filter_label(
         graph_names=graph_names,
+        dimension_labels=dimension_labels,
         train_seed_offsets=train_seed_offsets,
         theta_lr=theta_lr,
         mask_lr=mask_lr,
@@ -669,7 +873,7 @@ def plot_kl_results(
     axes[0].set_title(title or f"Min/Max NCM KL Divergence ({Path(root_dir)}){filter_label}")
     axes[1].set_xticks(xs)
     axes[1].set_xticklabels([_group_label(group) for group in groups], rotation=45, ha="right", fontsize=8)
-    axes[1].set_xlabel("Cycle lambda / mask mode, grouped by trial", labelpad=X_LABEL_PAD)
+    axes[1].set_xlabel("Cycle lambda / query min-max lambda / mask mode, grouped by trial", labelpad=X_LABEL_PAD)
     _add_trial_labels(axes[1], trial_groups)
 
     axes[0].legend(
@@ -738,6 +942,7 @@ def _print_summary_table(
         root_dir,
         include_nonstandard=False,
         graph_names=None,
+        dimension_labels=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -749,6 +954,7 @@ def _print_summary_table(
             load_bound_results(root_dir),
             include_nonstandard=include_nonstandard,
             graph_names=graph_names,
+            dimension_labels=dimension_labels,
             train_seed_offsets=train_seed_offsets,
             theta_lr=theta_lr,
             mask_lr=mask_lr,
@@ -786,6 +992,11 @@ def _print_summary_table(
         "mask_lr",
         "theta_steps",
         "mask_steps",
+        "mask_init",
+        "mask_fit_loss_weight",
+        "coupled",
+        "query_update_target",
+        "selection_query_lambda",
         "n",
         "true_KL_mean",
         "true_KL_std",
@@ -803,9 +1014,37 @@ def _print_summary_table(
         group_rows = grouped[group]
         cycle_lambda, mask_mode, trial_index, max_lambda, min_lambda = group[:5]
         if len(group) > 5:
-            alt_opt, dag_alm, theta_lr, mask_lr, theta_steps, mask_steps = group[5:]
+            (
+                alt_opt,
+                dag_alm,
+                theta_lr,
+                mask_lr,
+                theta_steps,
+                mask_steps,
+                mask_init_mode,
+                mask_init_value,
+                mask_init_range,
+                mask_fit_loss_weight,
+                mask_coupled_edges,
+                query_update_target,
+                selection_query_lambda,
+            ) = group[5:]
         else:
-            alt_opt, dag_alm, theta_lr, mask_lr, theta_steps, mask_steps = ("", "", None, None, "", "")
+            (
+                alt_opt,
+                dag_alm,
+                theta_lr,
+                mask_lr,
+                theta_steps,
+                mask_steps,
+                mask_init_mode,
+                mask_init_value,
+                mask_init_range,
+                mask_fit_loss_weight,
+                mask_coupled_edges,
+                query_update_target,
+                selection_query_lambda,
+            ) = ("", "", None, None, "", "", None, None, None, None, None, None, None)
         true_kl = [
             (row["min_total_true_KL"] + row["max_total_true_KL"]) / 2
             for row in group_rows
@@ -828,6 +1067,11 @@ def _print_summary_table(
             _format_float(mask_lr),
             str(theta_steps),
             str(mask_steps),
+            _format_init_label(mask_init_mode, mask_init_value, mask_init_range),
+            _format_float(mask_fit_loss_weight),
+            _format_coupling_label(mask_coupled_edges),
+            _format_optional(query_update_target),
+            _format_float(selection_query_lambda),
             str(len(group_rows)),
             _fmt(_mean(true_kl)),
             _fmt(_std(true_kl)),
@@ -843,6 +1087,7 @@ def _summary_metric_rows(
         root_dir,
         include_nonstandard=False,
         graph_names=None,
+        dimension_labels=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -854,6 +1099,7 @@ def _summary_metric_rows(
             load_bound_results(root_dir),
             include_nonstandard=include_nonstandard,
             graph_names=graph_names,
+            dimension_labels=dimension_labels,
             train_seed_offsets=train_seed_offsets,
             theta_lr=theta_lr,
             mask_lr=mask_lr,
@@ -887,6 +1133,13 @@ def _summary_metric_rows(
                 row["mask_lr"],
                 row["theta_steps_per_mask"],
                 row["mask_steps_per_theta"],
+                row["mask_init_mode"],
+                row["mask_init_value"],
+                row["mask_init_range"],
+                row["mask_fit_loss_weight"],
+                row["mask_coupled_edges"],
+                row["query_update_target"],
+                row["selection_query_lambda"],
             )
         metric_rows.append({
             "group": group,
@@ -905,6 +1158,7 @@ def plot_summary_stats(
         figsize=None,
         include_nonstandard=False,
         graph_names=None,
+        dimension_labels=None,
         train_seed_offsets=None,
         theta_lr=None,
         mask_lr=None,
@@ -915,6 +1169,7 @@ def plot_summary_stats(
         root_dir,
         include_nonstandard=include_nonstandard,
         graph_names=graph_names,
+        dimension_labels=dimension_labels,
         train_seed_offsets=train_seed_offsets,
         theta_lr=theta_lr,
         mask_lr=mask_lr,
@@ -942,10 +1197,24 @@ def plot_summary_stats(
         mask, cycle_lambda, max_lambda, min_lambda = group[:4]
         lines = [
             str(mask),
-            f"c={_format_float(cycle_lambda)}",
+            _cycle_query_lambda_label(cycle_lambda, min_lambda, max_lambda),
         ]
         if len(group) > 4:
-            alt_opt, dag_alm, theta_lr, mask_lr, theta_steps, mask_steps = group[4:]
+            (
+                alt_opt,
+                dag_alm,
+                theta_lr,
+                mask_lr,
+                theta_steps,
+                mask_steps,
+                mask_init_mode,
+                mask_init_value,
+                mask_init_range,
+                mask_fit_loss_weight,
+                mask_coupled_edges,
+                query_update_target,
+                selection_query_lambda,
+            ) = group[4:]
             parts = []
             if alt_opt:
                 parts.append("alt")
@@ -957,6 +1226,19 @@ def plot_summary_stats(
                 f"s={theta_steps}:{mask_steps}",
             ])
             lines.append(" ".join(parts))
+            lines.append(
+                " ".join([
+                    f"init={_format_init_label(mask_init_mode, mask_init_value, mask_init_range)}",
+                    f"mfit={_format_float(mask_fit_loss_weight)}",
+                ])
+            )
+            lines.append(
+                " ".join([
+                    f"coup={_format_coupling_label(mask_coupled_edges)}",
+                    f"q={_format_optional(query_update_target)}",
+                    f"sel={_format_float(selection_query_lambda)}",
+                ])
+            )
         labels.append("\n".join(lines))
     metrics = [
         ("min_kl", "Min KL"),
@@ -985,6 +1267,7 @@ def plot_summary_stats(
     axes[-1].set_xticklabels(labels, rotation=35, ha="right", fontsize=9)
     filter_label = _filter_label(
         graph_names=graph_names,
+        dimension_labels=dimension_labels,
         train_seed_offsets=train_seed_offsets,
         theta_lr=theta_lr,
         mask_lr=mask_lr,
@@ -1018,9 +1301,33 @@ def main():
         help="Filter by graph name. May be repeated.",
     )
     parser.add_argument(
+        "--dim",
+        action="append",
+        dest="dimension_labels",
+        help=(
+            "Filter by dimensionality label from the run directory, such as 1. "
+            "May be repeated."
+        ),
+    )
+    parser.add_argument(
         "--per-graph",
         action="store_true",
         help="Write separate bound, KL, and summary plots for each graph under the root.",
+    )
+    parser.add_argument(
+        "--subplot-graphs",
+        action="store_true",
+        help="Put each graph in its own subplot in the bound-results plot.",
+    )
+    parser.add_argument(
+        "--pool-train-seeds",
+        choices=[POOL_NONE, POOL_ENDPOINTS, POOL_ALL_OUTPUTS],
+        default=POOL_NONE,
+        help=(
+            "Pool NCM min/max markers across train seeds within each plotted group. "
+            "'endpoints' uses min over min outputs and max over max outputs; "
+            "'all-outputs' uses min/max over both min and max outputs."
+        ),
     )
     parser.add_argument(
         "--include-nonstandard",
@@ -1059,6 +1366,7 @@ def main():
         available_graphs = sorted({
             row["graph"] for row in rows
             if _matches_any(row["graph"], args.graph_names)
+            and _matches_any(row["dimension_label"], args.dimension_labels)
         })
         if not available_graphs:
             raise ValueError(f"No completed bound results found under {args.root_dir}")
@@ -1077,12 +1385,15 @@ def main():
             title=args.title,
             include_nonstandard=args.include_nonstandard,
             graph_names=graph_names,
+            dimension_labels=args.dimension_labels,
             train_seed_offsets=args.train_seed_offsets,
             theta_lr=args.theta_lr,
             mask_lr=args.mask_lr,
             theta_steps_per_mask=args.theta_steps_per_mask,
             mask_steps_per_theta=args.mask_steps_per_theta,
             schedule_filters=args.schedule_filters,
+            subplot_graphs=args.subplot_graphs and not args.per_graph,
+            pool_train_seeds=args.pool_train_seeds,
         )
         plot_kl_results(
             args.root_dir,
@@ -1090,6 +1401,7 @@ def main():
             title=args.kl_title,
             include_nonstandard=args.include_nonstandard,
             graph_names=graph_names,
+            dimension_labels=args.dimension_labels,
             train_seed_offsets=args.train_seed_offsets,
             theta_lr=args.theta_lr,
             mask_lr=args.mask_lr,
@@ -1103,6 +1415,7 @@ def main():
             title=args.summary_title,
             include_nonstandard=args.include_nonstandard,
             graph_names=graph_names,
+            dimension_labels=args.dimension_labels,
             train_seed_offsets=args.train_seed_offsets,
             theta_lr=args.theta_lr,
             mask_lr=args.mask_lr,
@@ -1115,6 +1428,7 @@ def main():
                 args.root_dir,
                 include_nonstandard=args.include_nonstandard,
                 graph_names=graph_names,
+                dimension_labels=args.dimension_labels,
                 train_seed_offsets=args.train_seed_offsets,
                 theta_lr=args.theta_lr,
                 mask_lr=args.mask_lr,

@@ -76,7 +76,7 @@ def write_csv(rows, output_path):
 
 
 def _graph_order(rows):
-    preferred = ["chain", "backdoor", "square", "four_clique"]
+    preferred = ["chain", "backdoor", "square", "four_clique", "barley"]
     present = {row["graph"] for row in rows}
     ordered = [graph for graph in preferred if graph in present]
     ordered.extend(sorted(present.difference(ordered)))
@@ -113,6 +113,7 @@ def plot_bounds(rows, output_path, treatment_values="all", title=None):
         "backdoor": "#F58518",
         "square": "#54A24B",
         "four_clique": "#B279A2",
+        "barley": "#E45756",
     }
 
     for ax, treatment_value in zip(axes, selected_values):

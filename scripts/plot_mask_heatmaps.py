@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -44,6 +45,13 @@ def _extract_graph(run_dir):
     for piece in run_dir.name.split("-"):
         if piece.startswith("graph="):
             return piece[len("graph="):]
+    return "?"
+
+
+def _extract_dimension_label(run_dir):
+    for piece in run_dir.name.split("-"):
+        if piece.startswith("dim="):
+            return piece[len("dim="):]
     return "?"
 
 
@@ -109,6 +117,14 @@ def _trial_sort_key(trial_index):
     return int(trial_index) if str(trial_index).isdigit() else str(trial_index)
 
 
+def _graph_sort_key(graph):
+    return str(graph)
+
+
+def _sanitize_output_label(value):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value))
+
+
 def _filter_values(value):
     if value is None:
         return None
@@ -145,6 +161,7 @@ def load_mask_rows(root_dir, include_nonstandard=False):
             "run_id": _extract_run_id(run_dir),
             "trial_index": _extract_trial_index(run_dir),
             "graph": _extract_graph(run_dir),
+            "dimension": _extract_dimension_label(run_dir),
             "cycle_lambda": _as_float(hyperparams.get("cycle-lambda")),
             "mask_mode": hyperparams.get("mask-mode", "?"),
             "train_seed_offset": hyperparams.get("train-seed-offset", "0"),
@@ -180,6 +197,7 @@ def load_mask_rows(root_dir, include_nonstandard=False):
 def _filter_rows(
         rows,
         graph_names=None,
+        dimensions=None,
         mask_mode=None,
         cycle_lambda=None,
         trial=None,
@@ -192,8 +210,11 @@ def _filter_rows(
         schedule_filters=None):
     filtered = []
     accepted_graphs = _filter_values(graph_names)
+    accepted_dimensions = _filter_values(dimensions)
     for row in rows:
         if accepted_graphs is not None and str(row["graph"]) not in accepted_graphs:
+            continue
+        if accepted_dimensions is not None and str(row["dimension"]) not in accepted_dimensions:
             continue
         if mask_mode is not None and row["mask_mode"] != mask_mode:
             continue
@@ -227,6 +248,7 @@ def _filter_rows(
 def _select_mask_rows(
         root_dir,
         graph_names=None,
+        dimensions=None,
         mask_mode=None,
         cycle_lambda=None,
         trial=None,
@@ -242,6 +264,7 @@ def _select_mask_rows(
     return _filter_rows(
         rows,
         graph_names=graph_names,
+        dimensions=dimensions,
         mask_mode=mask_mode,
         cycle_lambda=cycle_lambda,
         trial=trial,
@@ -275,6 +298,7 @@ def plot_mask_heatmaps(
         output_path=None,
         rows=None,
         graph_names=None,
+        dimensions=None,
         mask_mode=None,
         cycle_lambda=None,
         trial=None,
@@ -292,6 +316,7 @@ def plot_mask_heatmaps(
         rows = _select_mask_rows(
             root_dir,
             graph_names=graph_names,
+            dimensions=dimensions,
             mask_mode=mask_mode,
             cycle_lambda=cycle_lambda,
             trial=trial,
@@ -371,6 +396,8 @@ def plot_mask_heatmaps(
         filters = []
         if mask_mode is not None:
             filters.append(f"mask={mask_mode}")
+        if dimensions is not None:
+            filters.append(f"dim={','.join(sorted(_filter_values(dimensions)))}")
         if cycle_lambda is not None:
             filters.append(f"lambda={cycle_lambda:g}")
         if trial is not None:
@@ -412,9 +439,22 @@ def _trial_output_path(output_path, root_dir, trial):
     return str(output_path.with_name(f"{output_path.stem}_trial{trial_label}{output_path.suffix}"))
 
 
+def _graph_trial_output_path(output_path, root_dir, graph, trial):
+    graph_label = _sanitize_output_label(graph)
+    trial_label = _sanitize_output_label(trial)
+    if output_path is None:
+        output_path = Path(root_dir) / "mask_heatmaps.png"
+    else:
+        output_path = Path(output_path)
+    return str(output_path.with_name(
+        f"{output_path.stem}_graph-{graph_label}_trial-{trial_label}{output_path.suffix}"))
+
+
 def plot_mask_heatmaps_by_trial(
         root_dir,
         output_path=None,
+        graph_names=None,
+        dimensions=None,
         mask_mode=None,
         cycle_lambda=None,
         run_id=None,
@@ -429,6 +469,8 @@ def plot_mask_heatmaps_by_trial(
         title=None):
     rows = _select_mask_rows(
         root_dir,
+        graph_names=graph_names,
+        dimensions=dimensions,
         mask_mode=mask_mode,
         cycle_lambda=cycle_lambda,
         run_id=run_id,
@@ -456,6 +498,7 @@ def plot_mask_heatmaps_by_trial(
             output_path=trial_output,
             rows=trial_rows,
             graph_names=graph_names,
+            dimensions=dimensions,
             mask_mode=mask_mode,
             cycle_lambda=cycle_lambda,
             trial=trial,
@@ -475,12 +518,85 @@ def plot_mask_heatmaps_by_trial(
     return outputs
 
 
+def plot_mask_heatmaps_by_graph_trial(
+        root_dir,
+        output_path=None,
+        graph_names=None,
+        dimensions=None,
+        mask_mode=None,
+        cycle_lambda=None,
+        run_id=None,
+        train_seed_offset=None,
+        theta_lr=None,
+        mask_lr=None,
+        theta_steps_per_mask=None,
+        mask_steps_per_theta=None,
+        schedule_filters=None,
+        include_nonstandard=False,
+        max_rows=None,
+        title=None):
+    rows = _select_mask_rows(
+        root_dir,
+        graph_names=graph_names,
+        dimensions=dimensions,
+        mask_mode=mask_mode,
+        cycle_lambda=cycle_lambda,
+        run_id=run_id,
+        train_seed_offset=train_seed_offset,
+        theta_lr=theta_lr,
+        mask_lr=mask_lr,
+        theta_steps_per_mask=theta_steps_per_mask,
+        mask_steps_per_theta=mask_steps_per_theta,
+        schedule_filters=schedule_filters,
+        include_nonstandard=include_nonstandard,
+    )
+    if not rows:
+        raise ValueError("No mask rows matched the requested filters")
+
+    groups = {}
+    for row in rows:
+        groups.setdefault((row["graph"], row["trial_index"]), []).append(row)
+
+    outputs = []
+    for graph, trial in sorted(groups, key=lambda key: (_graph_sort_key(key[0]), _trial_sort_key(key[1]))):
+        group_rows = groups[(graph, trial)]
+        group_output = _graph_trial_output_path(output_path, root_dir, graph, trial)
+        group_title = title
+        if group_title is None:
+            group_title = f"Mask Heatmaps (graph={graph}, trial={trial})"
+        fig, _axes = plot_mask_heatmaps(
+            root_dir,
+            output_path=group_output,
+            rows=group_rows,
+            graph_names=[graph],
+            dimensions=dimensions,
+            mask_mode=mask_mode,
+            cycle_lambda=cycle_lambda,
+            trial=trial,
+            run_id=run_id,
+            train_seed_offset=train_seed_offset,
+            theta_lr=theta_lr,
+            mask_lr=mask_lr,
+            theta_steps_per_mask=theta_steps_per_mask,
+            mask_steps_per_theta=mask_steps_per_theta,
+            schedule_filters=schedule_filters,
+            include_nonstandard=include_nonstandard,
+            max_rows=max_rows,
+            title=group_title,
+        )
+        plt.close(fig)
+        outputs.append(group_output)
+    return outputs
+
+
 def main():
     parser = argparse.ArgumentParser(description="Plot learned min/max mask heatmaps for bound runs.")
     parser.add_argument("root_dir", help="Root directory to search recursively for mask_min.json files")
     parser.add_argument("--output", help="Defaults to <root_dir>/mask_heatmaps.png")
     parser.add_argument("--graph", action="append", dest="graph_names",
                         help="Filter by graph name. May be repeated.")
+    parser.add_argument("--dimension", "--dim", action="append", dest="dimensions",
+                        help="Filter by dimension parsed from dim=<value> in the run directory. May be repeated.")
     parser.add_argument("--mask-mode", help="Filter by mask mode, e.g. gate, multiply, st-gate")
     parser.add_argument("--cycle-lambda", type=float, help="Filter by cycle lambda")
     parser.add_argument("--trial", help="Filter by trial index")
@@ -501,15 +617,21 @@ def main():
         ),
     )
     parser.add_argument("--include-nonstandard", action="store_true",
-                        help="Include runs using alt-opt or dag-alm")
+                        help="Deprecated compatibility flag; nonstandard runs are included by default")
+    parser.add_argument("--standard-only", action="store_true",
+                        help="Only include runs without alt-opt or dag-alm")
+    parser.add_argument("--by-graph-trial", action="store_true",
+                        help="Save one plot per graph/trial group. This is automatic when multiple graphs match.")
     parser.add_argument("--max-rows", type=int, help="Maximum number of matching runs to plot")
     parser.add_argument("--title", help="Optional figure title")
     args = parser.parse_args()
 
     output = args.output or str(Path(args.root_dir) / "mask_heatmaps.png")
+    include_nonstandard = args.include_nonstandard or not args.standard_only
     rows = _select_mask_rows(
         args.root_dir,
         graph_names=args.graph_names,
+        dimensions=args.dimensions,
         mask_mode=args.mask_mode,
         cycle_lambda=args.cycle_lambda,
         trial=args.trial,
@@ -520,20 +642,28 @@ def main():
         theta_steps_per_mask=args.theta_steps_per_mask,
         mask_steps_per_theta=args.mask_steps_per_theta,
         schedule_filters=args.schedule_filters,
-        include_nonstandard=args.include_nonstandard,
+        include_nonstandard=include_nonstandard,
     )
+    if not rows:
+        raise ValueError("No mask rows matched the requested filters")
+
+    graphs = sorted({row["graph"] for row in rows}, key=_graph_sort_key)
     trials = sorted({row["trial_index"] for row in rows}, key=_trial_sort_key)
-    if args.trial is None and len(trials) > 1:
+    if args.by_graph_trial or args.trial is None or len(graphs) > 1:
         outputs = []
-        for trial in trials:
-            trial_rows = [row for row in rows if row["trial_index"] == trial]
-            trial_output = _trial_output_path(output, args.root_dir, trial)
-            trial_title = args.title or f"Mask Heatmaps (trial={trial})"
+        groups = {}
+        for row in rows:
+            groups.setdefault((row["graph"], row["trial_index"]), []).append(row)
+        for graph, trial in sorted(groups, key=lambda key: (_graph_sort_key(key[0]), _trial_sort_key(key[1]))):
+            group_rows = groups[(graph, trial)]
+            group_output = _graph_trial_output_path(output, args.root_dir, graph, trial)
+            group_title = args.title or f"Mask Heatmaps (graph={graph}, trial={trial})"
             fig, _axes = plot_mask_heatmaps(
                 args.root_dir,
-                output_path=trial_output,
-                rows=trial_rows,
-                graph_names=args.graph_names,
+                output_path=group_output,
+                rows=group_rows,
+                graph_names=[graph],
+                dimensions=args.dimensions,
                 mask_mode=args.mask_mode,
                 cycle_lambda=args.cycle_lambda,
                 trial=trial,
@@ -544,7 +674,38 @@ def main():
                 theta_steps_per_mask=args.theta_steps_per_mask,
                 mask_steps_per_theta=args.mask_steps_per_theta,
                 schedule_filters=args.schedule_filters,
-                include_nonstandard=args.include_nonstandard,
+                include_nonstandard=include_nonstandard,
+                max_rows=args.max_rows,
+                title=group_title,
+            )
+            plt.close(fig)
+            outputs.append(group_output)
+        print("Saved mask heatmaps to:")
+        for path in outputs:
+            print(path)
+    elif args.trial is None and len(trials) > 1:
+        outputs = []
+        for trial in trials:
+            trial_rows = [row for row in rows if row["trial_index"] == trial]
+            trial_output = _trial_output_path(output, args.root_dir, trial)
+            trial_title = args.title or f"Mask Heatmaps (trial={trial})"
+            fig, _axes = plot_mask_heatmaps(
+                args.root_dir,
+                output_path=trial_output,
+                rows=trial_rows,
+                graph_names=args.graph_names,
+                dimensions=args.dimensions,
+                mask_mode=args.mask_mode,
+                cycle_lambda=args.cycle_lambda,
+                trial=trial,
+                run_id=args.run_id,
+                train_seed_offset=args.train_seed_offset,
+                theta_lr=args.theta_lr,
+                mask_lr=args.mask_lr,
+                theta_steps_per_mask=args.theta_steps_per_mask,
+                mask_steps_per_theta=args.mask_steps_per_theta,
+                schedule_filters=args.schedule_filters,
+                include_nonstandard=include_nonstandard,
                 max_rows=args.max_rows,
                 title=trial_title,
             )
@@ -559,6 +720,7 @@ def main():
             output_path=output,
             rows=rows,
             graph_names=args.graph_names,
+            dimensions=args.dimensions,
             mask_mode=args.mask_mode,
             cycle_lambda=args.cycle_lambda,
             trial=args.trial,
@@ -569,7 +731,7 @@ def main():
             theta_steps_per_mask=args.theta_steps_per_mask,
             mask_steps_per_theta=args.mask_steps_per_theta,
             schedule_filters=args.schedule_filters,
-            include_nonstandard=args.include_nonstandard,
+            include_nonstandard=include_nonstandard,
             max_rows=args.max_rows,
             title=args.title,
         )

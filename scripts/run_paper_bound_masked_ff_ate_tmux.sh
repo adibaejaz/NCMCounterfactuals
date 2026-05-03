@@ -5,7 +5,9 @@ set -euo pipefail
 #
 # Usage:
 #   bash scripts/run_paper_bound_masked_ff_ate_tmux.sh nonchain
+#   bash scripts/run_paper_bound_masked_ff_ate_tmux.sh chain_backdoor
 #   bash scripts/run_paper_bound_masked_ff_ate_tmux.sh chain
+#   bash scripts/run_paper_bound_masked_ff_ate_tmux.sh backdoor
 #   bash scripts/run_paper_bound_masked_ff_ate_tmux.sh main3
 #   bash scripts/run_paper_bound_masked_ff_ate_tmux.sh four_clique
 #   bash scripts/run_paper_bound_masked_ff_ate_tmux.sh all
@@ -26,14 +28,26 @@ OFFSETS=(${OFFSETS:-1 2 3})
 MAX_SESSIONS_PER_GPU="${MAX_SESSIONS_PER_GPU:-2}"
 CPU_THREADS_PER_JOB="${CPU_THREADS_PER_JOB:-8}"
 N_TRIALS="${N_TRIALS:-5}"
+MASK_LR="${MASK_LR:-0.01}"
+MASK_FIT_LOSS_WEIGHT="${MASK_FIT_LOSS_WEIGHT:-1.0}"
+MASK_INIT_MODE="${MASK_INIT_MODE:-constant}"
+MASK_INIT_VALUE="${MASK_INIT_VALUE:-0.5}"
+MASK_INIT_LOW="${MASK_INIT_LOW:-0.25}"
+MASK_INIT_HIGH="${MASK_INIT_HIGH:-0.75}"
+THETA_STEPS_PER_MASK="${THETA_STEPS_PER_MASK:-1}"
+MASK_STEPS_PER_THETA="${MASK_STEPS_PER_THETA:-1}"
+QUERY_UPDATE_TARGET="${QUERY_UPDATE_TARGET:-mask}"
+SELECTION_QUERY_LAMBDA="${SELECTION_QUERY_LAMBDA:-1e-4}"
+USE_EQUIV_MASK="${USE_EQUIV_MASK:-0}"
+MASK_EQUIV_CLASS_FILE="${MASK_EQUIV_CLASS_FILE:-}"
 
 for gpu in "${GPUS[@]}"; do
   case "$gpu" in
-    0|1|2|3)
+    0|1|2|3|5|6|7)
       ;;
     *)
       echo "unsupported GPU for this script: $gpu" >&2
-      echo "allowed GPUs: 0 1 2 3" >&2
+      echo "allowed GPUs: 0 1 2 3 5 6 7" >&2
       exit 2
       ;;
   esac
@@ -64,15 +78,21 @@ case "$MODE" in
   nonchain)
     GRAPHS=(backdoor square four_clique)
     ;;
+  chain_backdoor|main2)
+    GRAPHS=(chain backdoor)
+    ;;
   chain)
     GRAPHS=(chain)
+    ;;
+  backdoor)
+    GRAPHS=(backdoor)
     ;;
   four_clique)
     GRAPHS=(four_clique)
     ;;
   *)
     echo "unknown mode: $MODE" >&2
-    echo "expected one of: all, main3, nonchain, chain, four_clique" >&2
+    echo "expected one of: all, main3, nonchain, chain_backdoor, main2, chain, backdoor, four_clique" >&2
     exit 2
     ;;
 esac
@@ -88,7 +108,11 @@ fixed_edge_args() {
   local graph="$1"
   case "$graph" in
     chain)
-      printf "%s" "--mask-fixed-zero 'X->Y' --mask-fixed-zero 'Y->X'"
+      if [[ -n "$MASK_EQUIV_CLASS_FILE" || "$USE_EQUIV_MASK" == "1" || "$USE_EQUIV_MASK" == "true" ]]; then
+        printf "%s" "--mask-fixed-zero 'X->Y' --mask-fixed-zero 'Y->X'"
+      else
+        printf "%s" "--mask-fixed-zero 'X->Y' --mask-fixed-zero 'Y->X' --mask-non-collider 'X,Z,Y'"
+      fi
       ;;
     square)
       printf "%s" "--mask-fixed-zero 'Y->W' --mask-fixed-zero 'Z->W' --mask-fixed-zero 'X->Y' --mask-fixed-zero 'Y->X' --mask-fixed-zero 'W->Z' --mask-fixed-one 'Z->Y' --mask-fixed-one 'W->Y' --mask-non-collider 'W,X,Z'"
@@ -97,6 +121,17 @@ fixed_edge_args() {
       printf "%s" ""
       ;;
   esac
+}
+
+equiv_mask_args() {
+  local graph="$1"
+  if [[ -n "$MASK_EQUIV_CLASS_FILE" ]]; then
+    printf "%s" "--mask-equiv-class-file ${MASK_EQUIV_CLASS_FILE}"
+  elif [[ "$USE_EQUIV_MASK" == "1" || "$USE_EQUIV_MASK" == "true" ]]; then
+    printf "%s" "--mask-equiv-class-file dat/cg/${graph}_equiv.cg"
+  else
+    printf "%s" ""
+  fi
 }
 
 base_cmd() {
@@ -116,26 +151,36 @@ base_cmd() {
     --dim 1 \
     --lr 4e-3 \
     --theta-lr 4e-3 \
-    --mask-lr 0.01 \
+    --mask-lr %s \
+    --mask-fit-loss-weight %s \
     --gpu 0 \
     --mask-mode multiply \
     --learn-mask \
     --cycle-lambda 0.1 \
     --cycle-penalty notears \
-    --mask-init-mode constant \
-    --mask-init-value 0.5 \
+    --mask-init-mode %s \
+    --mask-init-value %s \
+    --mask-init-low %s \
+    --mask-init-high %s \
+    %s \
     %s \
     --mask-l1-lambda 0 \
     --alt-opt \
-    --theta-steps-per-mask 1 \
-    --mask-steps-per-theta 1 \
+    --theta-steps-per-mask %s \
+    --mask-steps-per-theta %s \
     --theta-only-extra-epochs 50 \
     --no-theta-only-final-query-reg \
     --max-lambda 1e-2 \
     --min-lambda 1e-4 \
+    --selection-query-lambda %s \
+    --query-update-target %s \
     --train-seed-offset %s \
     --max-query-iters 1000" \
-    "$PYTHON_BIN" "$EXP_NAME" "$graph" "$N_TRIALS" "$(fixed_edge_args "$graph")" "$offset"
+    "$PYTHON_BIN" "$EXP_NAME" "$graph" "$N_TRIALS" "$MASK_LR" "$MASK_FIT_LOSS_WEIGHT" \
+    "$MASK_INIT_MODE" "$MASK_INIT_VALUE" "$MASK_INIT_LOW" "$MASK_INIT_HIGH" \
+    "$(fixed_edge_args "$graph")" "$(equiv_mask_args "$graph")" \
+    "$THETA_STEPS_PER_MASK" "$MASK_STEPS_PER_THETA" "$SELECTION_QUERY_LAMBDA" \
+    "$QUERY_UPDATE_TARGET" "$offset"
 }
 
 launch_tmux() {
@@ -186,6 +231,16 @@ echo "Trials per session: $N_TRIALS"
 echo "GPUs: ${GPUS[*]}"
 echo "Max sessions per GPU: $MAX_SESSIONS_PER_GPU"
 echo "CPU threads per new job: $CPU_THREADS_PER_JOB"
+echo "Mask LR: $MASK_LR"
+echo "Mask fit loss weight: $MASK_FIT_LOSS_WEIGHT"
+echo "Mask init: mode=$MASK_INIT_MODE value=$MASK_INIT_VALUE low=$MASK_INIT_LOW high=$MASK_INIT_HIGH"
+echo "Theta/mask steps: $THETA_STEPS_PER_MASK:$MASK_STEPS_PER_THETA"
+echo "Query update target: $QUERY_UPDATE_TARGET"
+echo "Selection query lambda: $SELECTION_QUERY_LAMBDA"
+echo "Use equivalence-class coupled mask: $USE_EQUIV_MASK"
+if [[ -n "$MASK_EQUIV_CLASS_FILE" ]]; then
+  echo "Mask equivalence class file override: $MASK_EQUIV_CLASS_FILE"
+fi
 for gpu in "${GPUS[@]}"; do
   echo "GPU $gpu sessions launched: ${gpu_session_counts[$gpu]}"
 done

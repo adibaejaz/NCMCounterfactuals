@@ -28,7 +28,7 @@ launch_run() {
     return
   fi
 
-  local cmd="$PYTHON_BIN -m src.enumeration_experiment ${EXP_ROOT} --graph chain --equiv-class-file dat/cg/chain_y_x_z_equiv.cg --bound-query --bound-treatment Z --bound-outcome Y --bound-treatment-value 0 --n-samples ${N_SAMPLES} --dim ${DIM} --lr ${LR} --data-bs 1000 --ncm-bs 1000 --regions 20 --gen-bs 10000 --id-reruns 1 --train-seed-offset ${seed_offset} --trial-index ${trial_index} --gpu 0"
+  local cmd="$PYTHON_BIN -m src.enumeration_experiment ${EXP_ROOT} --graph chain --equiv-class-file dat/cg/chain_equiv.cg --bound-query --bound-treatment Z --bound-outcome Y --bound-treatment-value 0 --n-samples ${N_SAMPLES} --dim ${DIM} --lr ${LR} --data-bs 1000 --ncm-bs 1000 --regions 20 --gen-bs 10000 --id-reruns 1 --train-seed-offset ${seed_offset} --trial-index ${trial_index} --gpu 0"
 
   echo "[launch] gpu=$gpu trial=$trial_index seed_offset=$seed_offset session=$session_name"
   tmux new-session -d -s "$session_name" \
