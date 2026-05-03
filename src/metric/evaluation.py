@@ -8,6 +8,7 @@ import torch as T
 
 from src.scm.scm import check_equal, expand_do
 from src.ds import CTF, CTFTerm
+from src.ds.causal_graph import CausalGraph
 
 
 def eval_query(m, ctf, n=1000000, model_kwargs=None):
@@ -149,6 +150,10 @@ def _metric_event_probability(metrics, stored, key, truth, event, n, truth_kwarg
 
 
 def _adjustment_domain_events(truth, adjustment_vars):
+    if not adjustment_vars:
+        yield {}
+        return
+
     if hasattr(truth, "space") and hasattr(truth, "v_size"):
         for event in truth.space(truth.v_size, select=adjustment_vars):
             yield {
@@ -166,6 +171,13 @@ def _finite_bounds(values):
     if not finite_values:
         return float("nan"), float("nan")
     return min(finite_values), max(finite_values)
+
+
+def _sachs_joint_truncated_graphs():
+    return tuple(
+        ("sachs_mec_joint_{:02d}".format(i), "dat/cg/sachs_mec_joint_{:02d}.cg".format(i))
+        for i in range(1, 13)
+    )
 
 
 def _chain_query_bound_metrics(
@@ -268,22 +280,71 @@ def _conditional_query_candidate(
         given={given_var: given_value})
 
 
-def _adjusted_query_candidate(
+def _conditional_event_query_candidate(
         metrics,
         truth,
         outcome_event,
-        treatment_var,
-        treatment_value,
+        given_event,
+        n,
+        truth_kwargs,
+        stored,
+        dat=None):
+    cond_key = "true_{}".format(serialize_probability(
+        outcome_event,
+        cond_vals=given_event))
+    return _metric_event_probability(
+        metrics,
+        stored,
+        cond_key,
+        truth,
+        outcome_event,
+        n,
+        truth_kwargs,
+        given=given_event,
+        dat=dat)
+
+
+def _adjustment_key_part(adjustment_vars):
+    adjustment_vars = tuple(adjustment_vars)
+    if not adjustment_vars:
+        return "none"
+    return "_".join(adjustment_vars)
+
+
+def _adjusted_event_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_event,
         adjustment_vars,
         do_name,
         n,
         truth_kwargs,
         stored,
-        adjusted_key=None):
-    adjusted = 0.0
+        adjusted_key=None,
+        dat=None):
     adjustment_vars = tuple(adjustment_vars)
-    sample_kwargs = truth_kwargs if truth_kwargs is not None else dict()
-    dat = truth(n, evaluating=True, **sample_kwargs)
+    if adjusted_key is None:
+        adjusted_key = "true_adjusted_{}_{}".format(
+            _adjustment_key_part(adjustment_vars), do_name)
+
+    if not adjustment_vars:
+        adjusted = _conditional_event_query_candidate(
+            metrics,
+            truth,
+            outcome_event,
+            treatment_event,
+            n,
+            truth_kwargs,
+            stored,
+            dat=dat)
+        metrics[adjusted_key] = adjusted
+        return adjusted
+
+    adjusted = 0.0
+    if dat is None:
+        sample_kwargs = truth_kwargs if truth_kwargs is not None else dict()
+        dat = truth(n, evaluating=True, **sample_kwargs)
     for adjustment_event in _adjustment_domain_events(truth, adjustment_vars):
         adjust_key = "true_{}".format(serialize_probability(adjustment_event))
         p_adjust = _metric_event_probability(
@@ -296,28 +357,103 @@ def _adjusted_query_candidate(
             truth_kwargs,
             dat=dat)
 
-        cond_vals = {treatment_var: treatment_value, **adjustment_event}
-        cond_key = "true_{}".format(serialize_probability(
-            outcome_event,
-            cond_vals=cond_vals))
-        p_y_given_t_adjust = _metric_event_probability(
+        cond_vals = {**treatment_event, **adjustment_event}
+        p_y_given_t_adjust = _conditional_event_query_candidate(
             metrics,
-            stored,
-            cond_key,
             truth,
             outcome_event,
+            cond_vals,
             n,
             truth_kwargs,
-            given=cond_vals,
+            stored,
             dat=dat)
         if np.isnan(p_y_given_t_adjust):
             continue
         adjusted += p_y_given_t_adjust * p_adjust
 
-    if adjusted_key is None:
-        adjusted_key = "true_adjusted_{}_{}".format("_".join(adjustment_vars), do_name)
     metrics[adjusted_key] = adjusted
     return adjusted
+
+
+def _adjusted_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_var,
+        treatment_value,
+        adjustment_vars,
+        do_name,
+        n,
+        truth_kwargs,
+        stored,
+        adjusted_key=None,
+        dat=None):
+    return _adjusted_event_query_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        {treatment_var: treatment_value},
+        adjustment_vars,
+        do_name,
+        n,
+        truth_kwargs,
+        stored,
+        adjusted_key=adjusted_key,
+        dat=dat)
+
+
+def _truncated_factorization_candidate(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_event,
+        dag,
+        do_name,
+        n,
+        truth_kwargs,
+        stored,
+        candidate_key,
+        dat=None):
+    outcome_vars = set(outcome_event)
+    treatment_vars = set(treatment_event)
+    ancestors = dag.ancestors(outcome_vars)
+    sum_vars = set(ancestors) - outcome_vars - treatment_vars
+    product_vars = dag.convert_set_to_sorted(set(ancestors) - treatment_vars)
+    sum_vars = dag.convert_set_to_sorted(sum_vars)
+
+    if dat is None:
+        sample_kwargs = truth_kwargs if truth_kwargs is not None else dict()
+        dat = truth(n, evaluating=True, **sample_kwargs)
+
+    total = 0.0
+    fixed_event = {**treatment_event, **outcome_event}
+    for assignment in _adjustment_domain_events(truth, sum_vars):
+        full_event = {**fixed_event, **assignment}
+        term = 1.0
+        for var in product_vars:
+            factor_event = {var: full_event[var]}
+            parent_event = {parent: full_event[parent] for parent in dag.pa[var]}
+            factor_key = "true_{}".format(serialize_probability(
+                factor_event,
+                cond_vals=parent_event))
+            factor = _metric_event_probability(
+                metrics,
+                stored,
+                factor_key,
+                truth,
+                factor_event,
+                n,
+                truth_kwargs,
+                given=parent_event,
+                dat=dat)
+            if np.isnan(factor):
+                term = 0.0
+                break
+            term *= factor
+        total += term
+
+    metrics[candidate_key] = total
+    return total
 
 
 def _sachs_adjustment_query_sets():
@@ -333,6 +469,36 @@ def _sachs_adjustment_query_sets():
         ("PKA", "Jnk"),
         ("P38",),
         ("PKA", "P38"),
+    )
+
+
+def _sachs_joint_adjustment_query_sets():
+    return (
+        (),
+        ("Jnk",),
+        ("P38",),
+        ("Erk", "Mek"),
+        ("Erk", "Mek", "Raf"),
+        ("Mek",),
+        ("Mek", "Raf"),
+        ("Raf",),
+    )
+
+
+def _barley_joint_adjustment_query_sets():
+    return (
+        (),
+        ("dg25",),
+        ("frspdag",),
+        ("srtprot",),
+        ("srtprot", "dg25"),
+        ("srtprot", "frspdag"),
+        ("sorttkv",),
+        ("sorttkv", "dg25"),
+        ("sorttkv", "frspdag"),
+        ("srtsize",),
+        ("srtsize", "dg25"),
+        ("srtsize", "frspdag"),
     )
 
 
@@ -505,6 +671,55 @@ def _sachs_query_bound_metrics(
     return bound
 
 
+def _sachs_joint_query_bound_metrics(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_event,
+        do_name,
+        n,
+        truth_kwargs,
+        stored):
+    bound = {}
+    values = []
+    sample_kwargs = truth_kwargs if truth_kwargs is not None else dict()
+    dat = truth(n, evaluating=True, **sample_kwargs)
+    for adjustment_vars in _sachs_joint_adjustment_query_sets():
+        adjusted = _adjusted_event_query_candidate(
+            metrics,
+            truth,
+            outcome_event,
+            treatment_event,
+            adjustment_vars,
+            do_name,
+            n,
+            truth_kwargs,
+            stored,
+            dat=dat)
+        bound["adjusted_{}".format(_adjustment_key_part(adjustment_vars))] = adjusted
+        values.append(adjusted)
+
+    for graph_name, graph_file in _sachs_joint_truncated_graphs():
+        truncated_key = "true_truncated_{}_{}".format(graph_name, do_name)
+        truncated = _truncated_factorization_candidate(
+            metrics,
+            truth,
+            outcome_event,
+            treatment_event,
+            CausalGraph.read(graph_file),
+            do_name,
+            n,
+            truth_kwargs,
+            stored,
+            truncated_key,
+            dat=dat)
+        bound["truncated_{}".format(graph_name)] = truncated
+        values.append(truncated)
+
+    bound["lower"], bound["upper"] = _finite_bounds(values)
+    return bound
+
+
 def _barley_query_bound_metrics(
         metrics,
         truth,
@@ -515,6 +730,8 @@ def _barley_query_bound_metrics(
         n,
         truth_kwargs,
         stored):
+    sample_kwargs = truth_kwargs if truth_kwargs is not None else dict()
+    dat = truth(n, evaluating=True, **sample_kwargs)
     srtprot_adjusted = _adjusted_query_candidate(
         metrics,
         truth,
@@ -525,7 +742,8 @@ def _barley_query_bound_metrics(
         do_name,
         n,
         truth_kwargs,
-        stored)
+        stored,
+        dat=dat)
     sorttkv_adjusted = _adjusted_query_candidate(
         metrics,
         truth,
@@ -536,7 +754,8 @@ def _barley_query_bound_metrics(
         do_name,
         n,
         truth_kwargs,
-        stored)
+        stored,
+        dat=dat)
     srtsize_adjusted = _adjusted_query_candidate(
         metrics,
         truth,
@@ -547,7 +766,8 @@ def _barley_query_bound_metrics(
         do_name,
         n,
         truth_kwargs,
-        stored)
+        stored,
+        dat=dat)
 
     values = [srtprot_adjusted, sorttkv_adjusted, srtsize_adjusted]
     lower, upper = _finite_bounds(values)
@@ -560,6 +780,38 @@ def _barley_query_bound_metrics(
     }
 
 
+def _barley_joint_query_bound_metrics(
+        metrics,
+        truth,
+        outcome_event,
+        treatment_event,
+        do_name,
+        n,
+        truth_kwargs,
+        stored):
+    bound = {}
+    values = []
+    sample_kwargs = truth_kwargs if truth_kwargs is not None else dict()
+    dat = truth(n, evaluating=True, **sample_kwargs)
+    for adjustment_vars in _barley_joint_adjustment_query_sets():
+        adjusted = _adjusted_event_query_candidate(
+            metrics,
+            truth,
+            outcome_event,
+            treatment_event,
+            adjustment_vars,
+            do_name,
+            n,
+            truth_kwargs,
+            stored,
+            dat=dat)
+        bound["adjusted_{}".format(_adjustment_key_part(adjustment_vars))] = adjusted
+        values.append(adjusted)
+
+    bound["lower"], bound["upper"] = _finite_bounds(values)
+    return bound
+
+
 def scm_query_bound_metrics(
         truth,
         graph_name=None,
@@ -569,7 +821,8 @@ def scm_query_bound_metrics(
         treatment_values=(0, 1),
         n=1000000,
         stored=None,
-        truth_kwargs=None):
+        truth_kwargs=None,
+        treatment_events=None):
     metrics = dict()
     graph_name = graph_name.lower() if graph_name is not None else None
     if graph_name == "barley":
@@ -579,12 +832,25 @@ def scm_query_bound_metrics(
             outcome_var = "protein"
     outcome_event = {outcome_var: outcome_value}
 
-    for treatment_value in treatment_values:
+    if treatment_events is None:
+        treatment_events = [{treatment_var: treatment_value} for treatment_value in treatment_values]
+    else:
+        treatment_events = [dict(treatment_event) for treatment_event in treatment_events]
+
+    for treatment_event in treatment_events:
         do_name = serialize_probability(
             outcome_event,
-            do_vals={treatment_var: treatment_value})
+            do_vals=treatment_event)
+
+        if len(treatment_event) == 1:
+            treatment_var, treatment_value = next(iter(treatment_event.items()))
+        else:
+            treatment_var = None
+            treatment_value = None
 
         if graph_name == "backdoor":
+            if len(treatment_event) != 1:
+                raise ValueError("backdoor bound metrics require a single treatment variable")
             bound = _backdoor_query_bound_metrics(
                 metrics,
                 truth,
@@ -596,6 +862,8 @@ def scm_query_bound_metrics(
                 truth_kwargs,
                 stored)
         elif graph_name == "square":
+            if len(treatment_event) != 1:
+                raise ValueError("square bound metrics require a single treatment variable")
             bound = _square_query_bound_metrics(
                 metrics,
                 truth,
@@ -607,6 +875,8 @@ def scm_query_bound_metrics(
                 truth_kwargs,
                 stored)
         elif graph_name == "four_clique":
+            if len(treatment_event) != 1:
+                raise ValueError("four_clique bound metrics require a single treatment variable")
             bound = _four_clique_query_bound_metrics(
                 metrics,
                 truth,
@@ -618,28 +888,58 @@ def scm_query_bound_metrics(
                 truth_kwargs,
                 stored)
         elif graph_name == "sachs":
-            bound = _sachs_query_bound_metrics(
-                metrics,
-                truth,
-                outcome_event,
-                treatment_var,
-                treatment_value,
-                do_name,
-                n,
-                truth_kwargs,
-                stored)
+            if len(treatment_event) == 1:
+                bound = _sachs_query_bound_metrics(
+                    metrics,
+                    truth,
+                    outcome_event,
+                    treatment_var,
+                    treatment_value,
+                    do_name,
+                    n,
+                    truth_kwargs,
+                    stored)
+            elif set(treatment_event) == {"PKA", "PKC"}:
+                bound = _sachs_joint_query_bound_metrics(
+                    metrics,
+                    truth,
+                    outcome_event,
+                    treatment_event,
+                    do_name,
+                    n,
+                    truth_kwargs,
+                    stored)
+            else:
+                raise ValueError(
+                    "sachs joint bound metrics currently support treatment variables PKA and PKC")
         elif graph_name == "barley":
-            bound = _barley_query_bound_metrics(
-                metrics,
-                truth,
-                outcome_event,
-                treatment_var,
-                treatment_value,
-                do_name,
-                n,
-                truth_kwargs,
-                stored)
+            if len(treatment_event) == 1:
+                bound = _barley_query_bound_metrics(
+                    metrics,
+                    truth,
+                    outcome_event,
+                    treatment_var,
+                    treatment_value,
+                    do_name,
+                    n,
+                    truth_kwargs,
+                    stored)
+            elif set(treatment_event) == {"sort", "saatid"}:
+                bound = _barley_joint_query_bound_metrics(
+                    metrics,
+                    truth,
+                    outcome_event,
+                    treatment_event,
+                    do_name,
+                    n,
+                    truth_kwargs,
+                    stored)
+            else:
+                raise ValueError(
+                    "barley joint bound metrics currently support treatment variables sort and saatid")
         else:
+            if len(treatment_event) != 1:
+                raise ValueError("bound metrics require a single treatment variable for graph {}".format(graph_name))
             bound = _chain_query_bound_metrics(
                 metrics,
                 truth,

@@ -11,7 +11,13 @@ from src.ds.causal_graph import CausalGraph
 from src.metric.queries import get_experimental_variables, get_query
 from src.pipeline import DivergencePipeline
 from src.run import EnumerationNCMRunner
-from src.run.data_setup import build_reused_data_bundle
+from src.run.data_setup import (
+    _build_v_sizes,
+    build_reused_data_bundle,
+    find_generated_dataset_dir,
+    load_generated_data_bundle,
+    parse_var_dim_overrides,
+)
 from src.scm.ctm import CTM
 from src.scm.model_classes import RoundModel, XORModel
 from src.scm.ncm import FF_NCM
@@ -78,6 +84,55 @@ def _find_reuse_source(root_dir, graph, n, dim, trial_index, train_seed_offset):
     return matches[0]
 
 
+def _resolve_data_bundle(args, graph, n, dim, trial_index, hyperparams, runner, dat_model, cg_file):
+    if not args.reuse_data_from and not args.reuse_data_root:
+        return None
+    if args.reuse_data_from and args.reuse_data_root:
+        raise ValueError("use only one of --reuse-data-from or --reuse-data-root")
+
+    key = runner.get_key(cg_file, n, dim, trial_index)
+    base_seed = runner.get_data_seed(key)
+
+    if args.reuse_data_from:
+        if os.path.isdir(args.reuse_data_from) and os.path.isfile(
+                os.path.join(args.reuse_data_from, "data_metadata.json")):
+            return load_generated_data_bundle(args.reuse_data_from, graph, dim, hyperparams)
+        return build_reused_data_bundle(
+            dat_model,
+            cg_file,
+            n,
+            dim,
+            hyperparams,
+            base_seed,
+            args.reuse_data_from,
+            max_seed_steps=args.data_seed_search_limit,
+        )
+
+    generated_source = find_generated_dataset_dir(
+        args.reuse_data_root, graph, n, dim, trial_index, hyperparams.get("v-sizes"))
+    if generated_source is not None:
+        return load_generated_data_bundle(generated_source, graph, dim, hyperparams)
+
+    source_path = _find_reuse_source(
+        args.reuse_data_root,
+        graph,
+        n,
+        dim,
+        trial_index,
+        args.train_seed_offset,
+    )
+    return build_reused_data_bundle(
+        dat_model,
+        cg_file,
+        n,
+        dim,
+        hyperparams,
+        base_seed,
+        source_path,
+        max_seed_steps=args.data_seed_search_limit,
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Enumerate a DAG equivalence class and train one DAG NCM per member")
     parser.add_argument("name", help="name of the experiment")
@@ -85,6 +140,10 @@ def build_parser():
                         help="path to a partially directed graph file with -- for undirected edges")
     parser.add_argument("--max-enum-dags", type=int, default=None,
                         help="optional cap on the number of enumerated DAGs")
+    parser.add_argument("--enum-sample-k", type=int, default=None,
+                        help="sample k DAGs after enumeration")
+    parser.add_argument("--enum-sample-seed", type=int, default=None,
+                        help="random seed for --enum-sample-k")
     parser.add_argument("--gen", default="ctm", choices=sorted(VALID_GENERATORS.keys()))
     parser.add_argument("--graph", default="backdoor", choices=sorted(VALID_GRAPHS))
     parser.add_argument("--query-track", default="ate")
@@ -107,8 +166,15 @@ def build_parser():
                         help="max increments past the base data seed when recovering a reused dataset")
     parser.add_argument("--n-samples", type=int, default=10000)
     parser.add_argument("--dim", type=int, default=1)
+    parser.add_argument("--var-dim", action="append", default=[],
+                        help="per-variable dimension override formatted as VAR=DIM; may be repeated")
     parser.add_argument("--gpu")
     parser.add_argument("--lr", type=float, default=4e-3)
+    parser.add_argument("--max-epochs", type=int, default=None)
+    parser.add_argument("--early-stop-patience", type=int, default=None)
+    parser.add_argument("--early-stop-min-delta", type=float, default=None)
+    parser.add_argument("--eval-n", type=int, default=1000000,
+                        help="Monte Carlo sample count for NCM evaluation")
     parser.add_argument("--data-bs", type=int, default=1000)
     parser.add_argument("--ncm-bs", type=int, default=1000)
     parser.add_argument("--h-layers", type=int, default=2)
@@ -159,9 +225,18 @@ def main():
         "positivity": not args.no_positivity,
         "equiv-class-file": args.equiv_class_file,
         "max-enum-dags": args.max_enum_dags,
+        "enum-sample-k": args.enum_sample_k,
+        "enum-sample-seed": args.enum_sample_seed,
         "id-reruns": args.id_reruns,
         "train-seed-offset": args.train_seed_offset,
+        "eval-n": args.eval_n,
     }
+    if args.max_epochs is not None:
+        hyperparams["max-epochs"] = args.max_epochs
+    if args.early_stop_patience is not None:
+        hyperparams["early-stop-patience"] = args.early_stop_patience
+    if args.early_stop_min_delta is not None:
+        hyperparams["early-stop-min-delta"] = args.early_stop_min_delta
 
     if args.trial_index:
         trial_indices = args.trial_index
@@ -196,6 +271,12 @@ def main():
 
         n = int(args.n_samples)
         d = int(args.dim)
+        graph_cg = CausalGraph.read("dat/cg/{}.cg".format(args.graph))
+        v_size_overrides = parse_var_dim_overrides(args.var_dim, graph_cg, strict=False)
+        if v_size_overrides:
+            hyperparams["v-sizes"] = _build_v_sizes(graph_cg, d, {"v-sizes": v_size_overrides})
+        else:
+            hyperparams.pop("v-sizes", None)
         hyperparams["data-bs"] = min(args.data_bs, n)
         hyperparams["ncm-bs"] = min(args.ncm_bs, n)
         if args.full_batch:
@@ -207,32 +288,10 @@ def main():
                 raise ValueError("--trial-index values must be nonnegative")
             cg_file = "dat/cg/{}.cg".format(args.graph)
             data_bundle = None
-            if args.reuse_data_from or args.reuse_data_root:
-                if args.reuse_data_from and args.reuse_data_root:
-                    raise ValueError("use only one of --reuse-data-from or --reuse-data-root")
-                source_path = args.reuse_data_from
-                if args.reuse_data_root:
-                    source_path = _find_reuse_source(
-                        args.reuse_data_root,
-                        args.graph,
-                        n,
-                        d,
-                        trial_index,
-                        args.train_seed_offset,
-                    )
-                key = runner.get_key(cg_file, n, d, trial_index)
-                base_seed = runner.get_data_seed(key)
-                data_bundle, recovered_seed = build_reused_data_bundle(
-                    VALID_GENERATORS[args.gen],
-                    cg_file,
-                    n,
-                    d,
-                    hyperparams,
-                    base_seed,
-                    source_path,
-                    max_seed_steps=args.data_seed_search_limit,
-                )
-                print("Reused data from:", source_path)
+            reused = _resolve_data_bundle(
+                args, args.graph, n, d, trial_index, hyperparams, runner, VALID_GENERATORS[args.gen], cg_file)
+            if reused is not None:
+                data_bundle, recovered_seed = reused
                 print("Recovered data seed:", recovered_seed)
             runner.run(
                 args.name,

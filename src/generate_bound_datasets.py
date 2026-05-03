@@ -48,10 +48,30 @@ def _parse_do_var_list(args):
     if args.do_regime == "obs":
         return [{}]
     if args.do_regime == "obs-x":
+        if len(args.bound_do) > 1:
+            return [{}, dict(args.bound_do)]
         return [{}, {args.bound_treatment: 0}, {args.bound_treatment: 1}]
     if args.do_regime == "graph-default":
         return get_experimental_variables(args.graph)
     raise ValueError("unknown do regime: {}".format(args.do_regime))
+
+
+def _parse_bound_do(args):
+    if args.bound_do_json is None:
+        return {args.bound_treatment: args.bound_treatment_value}
+
+    raw = json.loads(args.bound_do_json)
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("--bound-do-json must decode to a non-empty dictionary")
+
+    bound_do = {}
+    for var, value in raw.items():
+        if not isinstance(var, str):
+            raise ValueError("--bound-do-json keys must be variable names")
+        if not isinstance(value, int):
+            raise ValueError("--bound-do-json values must be integers")
+        bound_do[var] = value
+    return bound_do
 
 
 def _bit_columns(data, variables):
@@ -155,52 +175,123 @@ def _generate_candidate(cg, n, dim, hyperparams, do_var_list, seed):
 
 
 def _bound_diagnostics(dat_m, args):
-    treatment_values = tuple(sorted({0, 1, args.bound_treatment_value}))
+    outcome_event = {args.bound_outcome: args.bound_outcome_value}
+    if args.bound_do_json is None and len(args.bound_do) == 1:
+        treatment_values = tuple(sorted({0, 1, args.bound_treatment_value}))
+        metrics = scm_query_bound_metrics(
+            dat_m,
+            graph_name=args.graph,
+            outcome_var=args.bound_outcome,
+            outcome_value=args.bound_outcome_value,
+            treatment_var=args.bound_treatment,
+            treatment_values=treatment_values,
+            n=args.bound_mc_samples,
+        )
+
+        bounds_by_treatment_value = {}
+        for treatment_value in treatment_values:
+            do_name = serialize_probability(
+                outcome_event,
+                do_vals={args.bound_treatment: treatment_value})
+            lower_key = "true_lower_{}".format(do_name)
+            upper_key = "true_upper_{}".format(do_name)
+            lower = float(metrics[lower_key])
+            upper = float(metrics[upper_key])
+            bounds_by_treatment_value[str(treatment_value)] = {
+                "query": do_name,
+                "lower_key": lower_key,
+                "upper_key": upper_key,
+                "lower": lower,
+                "upper": upper,
+                "gap": upper - lower,
+            }
+
+        selected = bounds_by_treatment_value[str(args.bound_treatment_value)]
+        return {
+            "query": selected["query"],
+            "bound_mc_samples": int(args.bound_mc_samples),
+            "acceptance_treatment_value": int(args.bound_treatment_value),
+            "bound_do": dict(args.bound_do),
+            "lower_key": selected["lower_key"],
+            "upper_key": selected["upper_key"],
+            "lower": selected["lower"],
+            "upper": selected["upper"],
+            "gap": selected["gap"],
+            "passed": bool(selected["gap"] >= args.bound_gap_min),
+            "bounds_by_treatment_value": bounds_by_treatment_value,
+            "metrics": {k: float(v) for (k, v) in metrics.items()},
+        }
+
     metrics = scm_query_bound_metrics(
         dat_m,
         graph_name=args.graph,
         outcome_var=args.bound_outcome,
         outcome_value=args.bound_outcome_value,
-        treatment_var=args.bound_treatment,
-        treatment_values=treatment_values,
+        treatment_events=[args.bound_do],
         n=args.bound_mc_samples,
     )
-
-    bounds_by_treatment_value = {}
-    for treatment_value in treatment_values:
-        do_name = serialize_probability(
-            {args.bound_outcome: args.bound_outcome_value},
-            do_vals={args.bound_treatment: treatment_value})
-        lower_key = "true_lower_{}".format(do_name)
-        upper_key = "true_upper_{}".format(do_name)
-        lower = float(metrics[lower_key])
-        upper = float(metrics[upper_key])
-        bounds_by_treatment_value[str(treatment_value)] = {
-            "query": do_name,
-            "lower_key": lower_key,
-            "upper_key": upper_key,
-            "lower": lower,
-            "upper": upper,
-            "gap": upper - lower,
-        }
-
-    selected = bounds_by_treatment_value[str(args.bound_treatment_value)]
+    do_name = serialize_probability(outcome_event, do_vals=args.bound_do)
+    lower_key = "true_lower_{}".format(do_name)
+    upper_key = "true_upper_{}".format(do_name)
+    lower = float(metrics[lower_key])
+    upper = float(metrics[upper_key])
+    selected = {
+        "query": do_name,
+        "lower_key": lower_key,
+        "upper_key": upper_key,
+        "lower": lower,
+        "upper": upper,
+        "gap": upper - lower,
+    }
     return {
         "query": selected["query"],
         "bound_mc_samples": int(args.bound_mc_samples),
-        "acceptance_treatment_value": int(args.bound_treatment_value),
+        "acceptance_treatment_event": dict(args.bound_do),
+        "bound_do": dict(args.bound_do),
         "lower_key": selected["lower_key"],
         "upper_key": selected["upper_key"],
         "lower": selected["lower"],
         "upper": selected["upper"],
         "gap": selected["gap"],
         "passed": bool(selected["gap"] >= args.bound_gap_min),
-        "bounds_by_treatment_value": bounds_by_treatment_value,
+        "bounds_by_treatment_event": {
+            _stable_payload(args.bound_do): selected,
+        },
         "metrics": {k: float(v) for (k, v) in metrics.items()},
     }
 
 
-def _adjustment_query_sets(graph_name):
+def _barley_joint_adjustment_query_sets():
+    return (
+        (),
+        ("dg25",),
+        ("frspdag",),
+        ("srtprot",),
+        ("srtprot", "dg25"),
+        ("srtprot", "frspdag"),
+        ("sorttkv",),
+        ("sorttkv", "dg25"),
+        ("sorttkv", "frspdag"),
+        ("srtsize",),
+        ("srtsize", "dg25"),
+        ("srtsize", "frspdag"),
+    )
+
+
+def _sachs_joint_adjustment_query_sets():
+    return (
+        (),
+        ("Jnk",),
+        ("P38",),
+        ("Erk", "Mek"),
+        ("Erk", "Mek", "Raf"),
+        ("Mek",),
+        ("Mek", "Raf"),
+        ("Raf",),
+    )
+
+
+def _adjustment_query_sets(graph_name, bound_do=None):
     if graph_name == "backdoor":
         return (("Z",),)
     if graph_name == "square":
@@ -208,6 +299,8 @@ def _adjustment_query_sets(graph_name):
     if graph_name == "four_clique":
         return (("Z", "W"), ("Z",), ("W",))
     if graph_name == "sachs":
+        if bound_do is not None and set(bound_do) == {"PKA", "PKC"}:
+            return _sachs_joint_adjustment_query_sets()
         return (
             ("Raf",),
             ("PKA",),
@@ -222,18 +315,26 @@ def _adjustment_query_sets(graph_name):
             ("PKA", "P38"),
         )
     if graph_name == "barley":
+        if bound_do is not None and set(bound_do) == {"sort", "saatid"}:
+            return _barley_joint_adjustment_query_sets()
         return (("srtprot",), ("sorttkv",), ("srtsize",))
     return ()
+
+
+def _adjustment_key_part(adjustment_vars):
+    if not adjustment_vars:
+        return "none"
+    return "_".join(adjustment_vars)
 
 
 def _adjusted_metric_key(graph_name, adjustment_vars, do_name):
     if graph_name == "backdoor":
         return "true_adjusted_{}".format(do_name)
-    return "true_adjusted_{}_{}".format("_".join(adjustment_vars), do_name)
+    return "true_adjusted_{}_{}".format(_adjustment_key_part(adjustment_vars), do_name)
 
 
 def _adjustment_separation_diagnostics(bound_diagnostics, args):
-    adjustment_sets = _adjustment_query_sets(args.graph)
+    adjustment_sets = _adjustment_query_sets(args.graph, bound_do=args.bound_do)
     if not adjustment_sets:
         return {
             "enabled": False,
@@ -241,14 +342,13 @@ def _adjustment_separation_diagnostics(bound_diagnostics, args):
             "reason": "graph_has_no_adjustment_queries",
         }
 
-    treatment_value = args.bound_treatment_value
     outcome_event = {args.bound_outcome: args.bound_outcome_value}
     do_name = serialize_probability(
         outcome_event,
-        do_vals={args.bound_treatment: treatment_value})
+        do_vals=args.bound_do)
     conditional_key = "true_{}".format(serialize_probability(
         outcome_event,
-        cond_vals={args.bound_treatment: treatment_value}))
+        cond_vals=args.bound_do))
 
     metrics = bound_diagnostics["metrics"]
     conditional = float(metrics[conditional_key])
@@ -283,11 +383,18 @@ def _dimension_label(dim, v_sizes=None):
     return "{}-v{}".format(dim, "_".join(parts))
 
 
-def _trial_directory(root, graph, n, dim, trial_index, v_sizes=None):
+def _bound_do_label(bound_do):
+    return "_".join("{}{}".format(var, bound_do[var]) for var in sorted(bound_do))
+
+
+def _trial_directory(root, graph, n, dim, trial_index, v_sizes=None, bound_do_label=None):
+    query_part = ""
+    if bound_do_label:
+        query_part = "-bound_do={}".format(bound_do_label)
     return os.path.join(
         root,
-        "graph={}-n_samples={}-dim={}-trial_index={}".format(
-            graph, n, _dimension_label(dim, v_sizes), trial_index))
+        "graph={}-n_samples={}-dim={}{}-trial_index={}".format(
+            graph, n, _dimension_label(dim, v_sizes), query_part, trial_index))
 
 
 def _write_json(path, obj):
@@ -352,6 +459,15 @@ def _save_accepted(
 
 
 def _candidate_seed(args, trial_index, retry_index, hyperparams, do_var_list):
+    bound_payload = {
+        "outcome": args.bound_outcome,
+        "outcome_value": args.bound_outcome_value,
+        "treatment": args.bound_treatment,
+        "treatment_value": args.bound_treatment_value,
+    }
+    if args.bound_do_json is not None or len(args.bound_do) > 1:
+        bound_payload["do"] = dict(args.bound_do)
+
     return _stable_seed({
         "purpose": "paper_bound_dataset_generation",
         "graph": args.graph,
@@ -362,12 +478,7 @@ def _candidate_seed(args, trial_index, retry_index, hyperparams, do_var_list):
         "v_sizes": hyperparams.get("v-sizes"),
         "hyperparams": hyperparams,
         "do_var_list": do_var_list,
-        "bound": {
-            "outcome": args.bound_outcome,
-            "outcome_value": args.bound_outcome_value,
-            "treatment": args.bound_treatment,
-            "treatment_value": args.bound_treatment_value,
-        },
+        "bound": bound_payload,
     })
 
 
@@ -402,8 +513,10 @@ def _disabled_positivity_diagnostics(args):
 def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
     v_sizes = _build_v_sizes(cg, args.dim, hyperparams)
     explicit_v_sizes = v_sizes if hyperparams.get("v-sizes") else None
+    bound_do_label = _bound_do_label(args.bound_do) if len(args.bound_do) > 1 else None
     out_dir = _trial_directory(
-        args.name, args.graph, args.n_samples, args.dim, trial_index, explicit_v_sizes)
+        args.name, args.graph, args.n_samples, args.dim, trial_index, explicit_v_sizes,
+        bound_do_label=bound_do_label)
     if os.path.isfile(os.path.join(out_dir, "dat.th")) and not args.overwrite:
         print("[done]", out_dir)
         return
@@ -469,6 +582,8 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
             "dimension_label": _dimension_label(args.dim, explicit_v_sizes),
             "generator": "CTM",
             "do_var_list": do_var_list,
+            "bound_do": dict(args.bound_do),
+            "bound_do_label": _bound_do_label(args.bound_do),
             "accepted": len(reject_reasons) == 0,
             "reject_reasons": reject_reasons,
             "bound_gap_min": float(args.bound_gap_min),
@@ -532,6 +647,8 @@ def build_parser():
 
     parser.add_argument("--bound-treatment", default="X")
     parser.add_argument("--bound-treatment-value", type=int, default=0)
+    parser.add_argument("--bound-do-json",
+                        help="explicit bound intervention dictionary, e.g. '{\"sort\": 0, \"saatid\": 0}'")
     parser.add_argument("--bound-outcome", default="Y")
     parser.add_argument("--bound-outcome-value", type=int, default=1)
     parser.add_argument("--bound-gap-min", type=float, default=0.1)
@@ -559,6 +676,7 @@ def main():
             args.bound_treatment = "sort"
         if args.bound_outcome == "Y":
             args.bound_outcome = "protein"
+    args.bound_do = _parse_bound_do(args)
     if args.n_trials < 0:
         raise ValueError("--n-trials must be nonnegative")
     if args.max_retries < 0:
@@ -568,7 +686,7 @@ def main():
     cg = CausalGraph.read(cg_file)
     if args.positivity_epsilon is None:
         args.positivity_epsilon = _default_positivity_epsilon(cg)
-    required_vars = {args.bound_treatment, args.bound_outcome}
+    required_vars = set(args.bound_do) | {args.bound_outcome}
     if not required_vars.issubset(set(cg.v)):
         raise ValueError("graph {} does not contain {}".format(args.graph, sorted(required_vars)))
 
@@ -591,6 +709,8 @@ def main():
         "bound-outcome": args.bound_outcome,
         "bound-outcome-value": args.bound_outcome_value,
     }
+    if args.bound_do_json is not None or len(args.bound_do) > 1:
+        hyperparams["bound-do"] = dict(args.bound_do)
     if v_size_overrides:
         hyperparams["v-sizes"] = _build_v_sizes(cg, args.dim, {"v-sizes": v_size_overrides})
 

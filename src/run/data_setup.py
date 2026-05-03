@@ -2,6 +2,7 @@ import random
 import ast
 import os
 import json
+import glob
 from dataclasses import dataclass
 
 import torch as T
@@ -174,3 +175,73 @@ def build_reused_data_bundle(dat_model, cg_file, n, dim, hyperparams, base_seed,
     raise ValueError(
         "failed to recover saved data seed from {} within {} increments of base seed {}".format(
             dat_path, max_seed_steps, base_seed))
+
+
+def _dimension_label(dim, v_sizes=None):
+    if not v_sizes:
+        return str(dim)
+    parts = ["{}{}".format(var, v_sizes[var]) for var in sorted(v_sizes)]
+    return "{}-v{}".format(dim, "_".join(parts))
+
+
+def generated_dataset_dir(root_dir, graph, n, dim, trial_index, v_sizes=None):
+    return os.path.join(
+        root_dir,
+        "graph={}-n_samples={}-dim={}-trial_index={}".format(
+            graph, n, _dimension_label(dim, v_sizes), trial_index))
+
+
+def find_generated_dataset_dir(root_dir, graph, n, dim, trial_index, v_sizes=None):
+    exact = generated_dataset_dir(root_dir, graph, n, dim, trial_index, v_sizes)
+    if os.path.isdir(exact):
+        return exact
+
+    pattern = os.path.join(
+        root_dir,
+        "graph={}-n_samples={}-dim={}*-trial_index={}".format(graph, n, dim, trial_index))
+    matches = sorted(
+        path for path in glob.glob(pattern)
+        if os.path.isdir(path) and os.path.isfile(os.path.join(path, "data_metadata.json"))
+    )
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError("multiple generated datasets match {}: {}".format(pattern, matches))
+    return None
+
+
+def load_generated_data_bundle(source_path, graph, dim, hyperparams):
+    source_path = os.path.abspath(source_path)
+    source_dir = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
+    metadata_path = os.path.join(source_dir, "data_metadata.json")
+    if not os.path.isfile(metadata_path):
+        raise FileNotFoundError("generated data metadata not found at {}".format(metadata_path))
+
+    with open(metadata_path) as file:
+        metadata = json.load(file)
+    seed = int(metadata["candidate_seed"])
+    metadata_v_sizes = metadata.get("v_sizes")
+
+    dat_path = source_path if os.path.isfile(source_path) else os.path.join(source_dir, "{}_dat.th".format(graph))
+    if not os.path.isfile(dat_path):
+        dat_path = os.path.join(source_dir, "dat.th")
+    if not os.path.isfile(dat_path):
+        raise FileNotFoundError("generated dataset not found at {}".format(dat_path))
+
+    stored_path = os.path.join(source_dir, "{}_stored_metrics.th".format(graph))
+    if not os.path.isfile(stored_path):
+        stored_path = os.path.join(source_dir, "stored_metrics.th")
+
+    generated_hp = dict(hyperparams)
+    source_hp_path = os.path.join(source_dir, "hyperparams.json")
+    if os.path.isfile(source_hp_path):
+        with open(source_hp_path) as file:
+            generated_hp.update(_coerce_numeric_hyperparams(json.load(file)))
+    if metadata_v_sizes is not None:
+        generated_hp["v-sizes"] = metadata_v_sizes
+
+    cg = CausalGraph.read("dat/cg/{}.cg".format(graph))
+    dat_m = _build_dat_model(CTM, cg, dim, generated_hp, seed)
+    dat_sets = T.load(dat_path)
+    stored_metrics = T.load(stored_path) if os.path.isfile(stored_path) else dict()
+    return DataBundle(cg=cg, dat_m=dat_m, dat_sets=dat_sets, stored_metrics=stored_metrics), seed

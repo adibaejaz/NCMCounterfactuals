@@ -25,7 +25,9 @@ class EnumerationNCMRunner(BaseRunner):
         if T.cuda.is_available():
             T.cuda.synchronize()
 
-    def create_trainer(self, directory, gpu=None):
+    def create_trainer(self, directory, gpu=None, hyperparams=None):
+        if hyperparams is None:
+            hyperparams = dict()
         checkpoint = pl.callbacks.ModelCheckpoint(
             dirpath=f"{directory}/checkpoints/",
             monitor="train_loss",
@@ -36,12 +38,12 @@ class EnumerationNCMRunner(BaseRunner):
                 checkpoint,
                 pl.callbacks.EarlyStopping(
                     monitor="train_loss",
-                    patience=self.pipeline.patience,
-                    min_delta=self.pipeline.min_delta,
+                    patience=int(hyperparams.get("early-stop-patience", self.pipeline.patience)),
+                    min_delta=float(hyperparams.get("early-stop-min-delta", self.pipeline.min_delta)),
                     check_on_train_epoch_end=True,
                 ),
             ],
-            max_epochs=self.pipeline.max_epochs,
+            max_epochs=int(hyperparams.get("max-epochs", self.pipeline.max_epochs)),
             accumulate_grad_batches=1,
             logger=pl.loggers.TensorBoardLogger(f"{directory}/logs/"),
             log_every_n_steps=1,
@@ -67,6 +69,67 @@ class EnumerationNCMRunner(BaseRunner):
         with open(results_path) as file:
             return json.load(file)
 
+    def _sample_indexed_dags(self, indexed_dags, hyperparams, key, rerun_index=0):
+        sample_k = hyperparams.get("enum-sample-k")
+        if sample_k is None:
+            return indexed_dags, None
+        sample_k = int(sample_k)
+        if sample_k < 1:
+            raise ValueError("enum-sample-k must be positive")
+        if sample_k >= len(indexed_dags):
+            return indexed_dags, None
+
+        base_seed = hyperparams.get("enum-sample-seed")
+        if base_seed is None:
+            seed_payload = "enum-sample|{}|rerun={}|{}".format(
+                key, rerun_index, self._stable_hyperparams_payload(hyperparams))
+        elif int(rerun_index) == 0:
+            seed_payload = "enum-sample|base={}|{}".format(int(base_seed), key)
+        else:
+            seed_payload = "enum-sample|base={}|{}|rerun={}".format(
+                int(base_seed), key, rerun_index)
+        effective_seed = self._hash_to_seed(seed_payload)
+        rng = random.Random(effective_seed)
+        sampled_positions = sorted(rng.sample(range(len(indexed_dags)), sample_k))
+        return [indexed_dags[position] for position in sampled_positions], effective_seed
+
+    def _legacy_single_rerun_dir(self, exp_name, cg_file, n, dim, trial_index, hyperparams):
+        legacy_hyperparams = dict(hyperparams)
+        legacy_hyperparams["id-reruns"] = 1
+        legacy_run_key = self.get_run_key(cg_file, n, dim, trial_index, legacy_hyperparams)
+        return "out/{}/{}".format(exp_name, legacy_run_key)
+
+    def _copy_legacy_path(self, src, dst):
+        if not os.path.exists(src) or os.path.exists(dst):
+            return
+        if os.path.isdir(src):
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+
+    def _migrate_legacy_single_rerun(self, exp_name, cg_file, n, dim, trial_index, hyperparams, out_dir):
+        if int(hyperparams.get("id-reruns", 1)) <= 1:
+            return False
+
+        legacy_dir = self._legacy_single_rerun_dir(exp_name, cg_file, n, dim, trial_index, hyperparams)
+        legacy_results = os.path.join(legacy_dir, "results.json")
+        if legacy_dir == out_dir or not os.path.isfile(legacy_results):
+            return False
+
+        rerun_dir = os.path.join(out_dir, "0")
+        rerun_results = os.path.join(rerun_dir, "results.json")
+        if os.path.isfile(rerun_results):
+            return False
+
+        print("[migrate] legacy single-rerun result {} -> {}".format(legacy_dir, rerun_dir))
+        os.makedirs(rerun_dir, exist_ok=True)
+        self._copy_legacy_path(legacy_results, rerun_results)
+        self._copy_legacy_path(os.path.join(legacy_dir, "dag_results.json"), os.path.join(rerun_dir, "dag_results.json"))
+        self._copy_legacy_path(os.path.join(legacy_dir, "class_summary.json"), os.path.join(rerun_dir, "class_summary.json"))
+        self._copy_legacy_path(os.path.join(legacy_dir, "dags"), os.path.join(rerun_dir, "dags"))
+        self._copy_legacy_path(os.path.join(legacy_dir, "dat.th"), os.path.join(out_dir, "dat.th"))
+        return True
+
     def _aggregate_results(self, dag_results, truth, query_track, query_bounds=None, stored_metrics=None):
         summary = {
             "num_dags": len(dag_results),
@@ -75,11 +138,12 @@ class EnumerationNCMRunner(BaseRunner):
             stored_metrics = dict()
 
         if query_track is not None:
+            eval_n = int(stored_metrics.get("eval-n", 1000000))
             query_name = evaluation.serialize_query(query_track)
             true_key = "true_{}".format(query_name)
             true_value = stored_metrics.get(true_key)
             if true_value is None:
-                true_value = evaluation.eval_query(truth, query_track, 1000000)
+                true_value = evaluation.eval_query(truth, query_track, eval_n)
             summary[true_key] = true_value
 
             value_key = "ncm_{}".format(query_name)
@@ -101,9 +165,10 @@ class EnumerationNCMRunner(BaseRunner):
             summary["enum_max_total_dat_KL"] = max_row.get("total_dat_KL")
 
         if query_bounds is not None:
+            eval_n = int(stored_metrics.get("eval-n", 1000000))
             summary.update(evaluation.scm_query_bound_metrics(
                 truth,
-                n=1000000,
+                n=eval_n,
                 stored=stored_metrics,
                 **query_bounds,
             ))
@@ -114,6 +179,7 @@ class EnumerationNCMRunner(BaseRunner):
             lockinfo=os.environ.get("SLURM_JOB_ID", ""), verbose=False):
         if hyperparams is None:
             hyperparams = dict()
+        eval_n = int(hyperparams.get("eval-n", 1000000))
 
         eq_file = hyperparams.get("equiv-class-file")
         if not eq_file:
@@ -122,6 +188,7 @@ class EnumerationNCMRunner(BaseRunner):
         key = self.get_key(cg_file, n, dim, trial_index)
         run_key = self.get_run_key(cg_file, n, dim, trial_index, hyperparams)
         out_dir = "out/{}/{}".format(exp_name, run_key)
+        id_reruns = int(hyperparams.get("id-reruns", 1))
 
         with self.lock(f"{out_dir}/lock", lockinfo) as acquired_lock:
             if not acquired_lock:
@@ -129,6 +196,8 @@ class EnumerationNCMRunner(BaseRunner):
                 return
 
             try:
+                self._migrate_legacy_single_rerun(
+                    exp_name, cg_file, n, dim, trial_index, hyperparams, out_dir)
                 final_path = os.path.join(out_dir, "results.json")
                 if os.path.isfile(final_path):
                     print("[done]", out_dir)
@@ -159,6 +228,7 @@ class EnumerationNCMRunner(BaseRunner):
                 dags = enumerate_dags_in_class(class_spec, max_dags=hyperparams.get("max-enum-dags"))
                 if not dags:
                     raise ValueError("equivalence class enumeration produced no DAGs")
+                all_indexed_dags = list(enumerate(dags))
                 graph_generation_wall_seconds = time.perf_counter() - graph_generation_start
 
                 os.makedirs(out_dir, exist_ok=True)
@@ -170,7 +240,10 @@ class EnumerationNCMRunner(BaseRunner):
                         "num_vertices": len(class_spec.vertices),
                         "num_directed_edges": len(class_spec.directed_edges),
                         "num_undirected_edges": len(class_spec.undirected_edges),
-                        "num_dags": len(dags),
+                        "num_enumerated_dags": len(dags),
+                        "enum_sample_k": hyperparams.get("enum-sample-k"),
+                        "enum_sample_seed": hyperparams.get("enum-sample-seed"),
+                        "sampled_per_rerun": True,
                         "graph_generation_wall_seconds": graph_generation_wall_seconds,
                     }, file)
 
@@ -178,7 +251,6 @@ class EnumerationNCMRunner(BaseRunner):
                     gpu = int(T.cuda.is_available())
 
                 rerun_summaries = []
-                id_reruns = int(hyperparams.get("id-reruns", 1))
                 for rerun_index in range(id_reruns):
                     rerun_dir = out_dir if id_reruns == 1 else os.path.join(out_dir, str(rerun_index))
                     rerun_final_path = os.path.join(rerun_dir, "results.json")
@@ -191,7 +263,20 @@ class EnumerationNCMRunner(BaseRunner):
 
                     dag_results = []
                     rerun_start = time.perf_counter()
-                    for dag_index, dag in enumerate(dags):
+                    indexed_dags, effective_sample_seed = self._sample_indexed_dags(
+                        all_indexed_dags, hyperparams, key, rerun_index=rerun_index)
+                    rerun_class_summary = {
+                        "num_sampled_dags": len(indexed_dags),
+                        "sampled_dag_indices": [dag_index for (dag_index, _) in indexed_dags],
+                        "enum_sample_k": hyperparams.get("enum-sample-k"),
+                        "enum_sample_seed": hyperparams.get("enum-sample-seed"),
+                        "enum_effective_sample_seed": effective_sample_seed,
+                        "rerun_index": rerun_index,
+                    }
+                    os.makedirs(rerun_dir, exist_ok=True)
+                    with open(os.path.join(rerun_dir, "class_summary.json"), "w") as file:
+                        json.dump(rerun_class_summary, file)
+                    for dag_index, dag in indexed_dags:
                         candidate_dir = os.path.join(rerun_dir, "dags", "{:04d}".format(dag_index))
                         existing = self._load_existing_candidate(candidate_dir)
                         if existing is not None:
@@ -221,6 +306,7 @@ class EnumerationNCMRunner(BaseRunner):
                         )
 
                         stored_metrics = dict(data_bundle.stored_metrics)
+                        stored_metrics["eval-n"] = eval_n
                         self._sync_cuda()
                         initial_eval_start = time.perf_counter()
                         start_metrics = evaluation.all_metrics(
@@ -228,7 +314,7 @@ class EnumerationNCMRunner(BaseRunner):
                             model.ncm,
                             hyperparams["do-var-list"],
                             data_bundle.dat_sets,
-                            n=1000000,
+                            n=eval_n,
                             stored=stored_metrics,
                             query_track=hyperparams["eval-query"],
                         )
@@ -238,7 +324,7 @@ class EnumerationNCMRunner(BaseRunner):
                         stored_metrics[true_q] = start_metrics[true_q]
                         model.update_metrics(stored_metrics)
 
-                        trainer, checkpoint = self.create_trainer(candidate_dir, gpu)
+                        trainer, checkpoint = self.create_trainer(candidate_dir, gpu, hyperparams=hyperparams)
                         self._sync_cuda()
                         train_start = time.perf_counter()
                         trainer.fit(model)
@@ -254,7 +340,7 @@ class EnumerationNCMRunner(BaseRunner):
                             model.ncm,
                             hyperparams["do-var-list"],
                             data_bundle.dat_sets,
-                            n=1000000,
+                            n=eval_n,
                             query_track=hyperparams["eval-query"],
                         )
                         self._sync_cuda()
@@ -281,9 +367,10 @@ class EnumerationNCMRunner(BaseRunner):
                         truth=data_bundle.dat_m,
                         query_track=hyperparams["eval-query"],
                         query_bounds=hyperparams.get("query-bound-spec"),
-                        stored_metrics=data_bundle.stored_metrics,
+                        stored_metrics={**data_bundle.stored_metrics, "eval-n": eval_n},
                     )
                     summary["rerun_index"] = rerun_index
+                    summary.update(rerun_class_summary)
                     summary["data_setup_wall_seconds"] = data_setup_wall_seconds
                     summary["enum_graph_generation_wall_seconds"] = graph_generation_wall_seconds
                     summary["enum_initial_eval_wall_seconds"] = sum(

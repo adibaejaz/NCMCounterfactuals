@@ -5,6 +5,7 @@ import torch as T
 import src.metric.divergences as dvg
 from src.metric.evaluation import all_metrics
 from src.ds.causal_graph import CausalGraph
+from src.run.data_setup import _build_v_sizes
 from src.scm.ncm.feedforward_ncm import FF_NCM
 from src.scm.scm import expand_do
 
@@ -18,7 +19,7 @@ class DivergencePipeline(BasePipeline):
         if hyperparams is None:
             hyperparams = dict()
 
-        v_size = {v: dim if v not in ('X', 'Y') else 1 for v in cg.v}
+        v_size = _build_v_sizes(cg, dim, hyperparams)
         ncm = ncm_model(cg, v_size=v_size, default_u_size=hyperparams.get('u-size', 1), hyperparams=hyperparams)
         super().__init__(generator, do_var_list, dat_sets, cg, dim, ncm, batch_size=hyperparams.get('data-bs', 1000))
 
