@@ -189,17 +189,19 @@ def _chain_query_bound_metrics(
         do_name,
         n,
         truth_kwargs,
-        stored):
+        stored,
+        dat=None):
     marginal_key = "true_{}".format(serialize_probability(outcome_event))
     p_y = _metric_event_probability(
-        metrics, stored, marginal_key, truth, outcome_event, n, truth_kwargs)
+        metrics, stored, marginal_key, truth, outcome_event, n, truth_kwargs, dat=dat)
 
     cond_key = "true_{}".format(serialize_probability(
         outcome_event,
         cond_vals={treatment_var: treatment_value}))
     p_y_given_t = _metric_event_probability(
         metrics, stored, cond_key, truth, outcome_event, n, truth_kwargs,
-        given={treatment_var: treatment_value})
+        given={treatment_var: treatment_value},
+        dat=dat)
 
     lower, upper = _finite_bounds([p_y, p_y_given_t])
     return {
@@ -565,6 +567,8 @@ def _four_clique_query_bound_metrics(
         n,
         truth_kwargs,
         stored):
+    sample_kwargs = truth_kwargs if truth_kwargs is not None else dict()
+    dat = truth(n, evaluating=True, **sample_kwargs)
     candidates = _chain_query_bound_metrics(
         metrics,
         truth,
@@ -574,7 +578,8 @@ def _four_clique_query_bound_metrics(
         do_name,
         n,
         truth_kwargs,
-        stored)
+        stored,
+        dat=dat)
     zw_adjusted = _adjusted_query_candidate(
         metrics,
         truth,
@@ -585,7 +590,8 @@ def _four_clique_query_bound_metrics(
         do_name,
         n,
         truth_kwargs,
-        stored)
+        stored,
+        dat=dat)
     z_adjusted = _adjusted_query_candidate(
         metrics,
         truth,
@@ -596,7 +602,8 @@ def _four_clique_query_bound_metrics(
         do_name,
         n,
         truth_kwargs,
-        stored)
+        stored,
+        dat=dat)
     w_adjusted = _adjusted_query_candidate(
         metrics,
         truth,
@@ -607,7 +614,8 @@ def _four_clique_query_bound_metrics(
         do_name,
         n,
         truth_kwargs,
-        stored)
+        stored,
+        dat=dat)
 
     values = [
         candidates["marginal"],

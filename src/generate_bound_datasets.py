@@ -6,10 +6,13 @@ saves the accepted datasets for downstream experiments.
 """
 
 import argparse
+from contextlib import contextmanager
+import datetime
 import hashlib
 import json
 import os
 import random
+import socket
 
 import numpy as np
 import torch as T
@@ -402,6 +405,42 @@ def _write_json(path, obj):
         json.dump(obj, file, indent=2, sort_keys=True)
 
 
+def _lock_payload(args, trial_index):
+    return {
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "cwd": os.getcwd(),
+        "started_at_utc": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "lockinfo": args.lockinfo,
+        "graph": args.graph,
+        "trial_index": int(trial_index),
+        "n_samples": int(args.n_samples),
+        "dim": int(args.dim),
+    }
+
+
+@contextmanager
+def _trial_lock(out_dir, args, trial_index):
+    os.makedirs(out_dir, exist_ok=True)
+    lock_path = os.path.join(out_dir, "lock.json")
+    payload = _lock_payload(args, trial_index)
+    try:
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        yield False
+        return
+
+    try:
+        with os.fdopen(fd, "w") as file:
+            json.dump(payload, file, indent=2, sort_keys=True)
+        yield True
+    finally:
+        try:
+            os.remove(lock_path)
+        except FileNotFoundError:
+            pass
+
+
 def _append_jsonl(path, obj):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a") as file:
@@ -521,6 +560,17 @@ def _run_trial(args, trial_index, cg, do_var_list, hyperparams):
         print("[done]", out_dir)
         return
 
+    with _trial_lock(out_dir, args, trial_index) as acquired_lock:
+        if not acquired_lock:
+            print("[locked]", out_dir)
+            return
+        if os.path.isfile(os.path.join(out_dir, "dat.th")) and not args.overwrite:
+            print("[done]", out_dir)
+            return
+        _run_trial_locked(args, trial_index, cg, do_var_list, hyperparams, out_dir, v_sizes, explicit_v_sizes)
+
+
+def _run_trial_locked(args, trial_index, cg, do_var_list, hyperparams, out_dir, v_sizes, explicit_v_sizes):
     reject_log = os.path.join(out_dir, "rejected_candidates.jsonl")
     if args.overwrite and os.path.isfile(reject_log):
         os.remove(reject_log)
@@ -666,6 +716,8 @@ def build_parser():
                         help="do not require true/empirical joint positivity")
     parser.add_argument("--max-retries", type=int, default=1000)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--lockinfo", default=os.environ.get("SLURM_JOB_ID", ""),
+                        help="extra string written to lock.json, e.g. a scheduler job id")
     return parser
 
 
