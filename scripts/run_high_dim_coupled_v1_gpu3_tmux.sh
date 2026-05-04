@@ -9,13 +9,30 @@ EXP_NAME="${EXP_NAME:-overnight_runs/coupling/paper_bound_masked_ff_overnight_co
 SESSION_PREFIX="${SESSION_PREFIX:-hd_coupled_v1_gpu3}"
 GPU="${GPU:-3}"
 SEEDS=(${SEEDS:-1 2 3})
+GPUS=(${GPUS:-0 1 2})
 CPU_THREADS_PER_JOB="${CPU_THREADS_PER_JOB:-8}"
 DATA_ROOT="${DATA_ROOT:-out/high_dim_small_graphs}"
 N_SAMPLES="${N_SAMPLES:-100000}"
 N_TRIALS="${N_TRIALS:-5}"
+TRIAL_INDICES=(${TRIAL_INDICES:-})
 DIM="${DIM:-8}"
 U_SIZE="${U_SIZE:-8}"
 SEED_GPU_PREFIX="${SEED_GPU_PREFIX:-hd_coupled_v1_u${U_SIZE}}"
+
+trial_args() {
+  local args=""
+  local trial
+
+  if [[ "${#TRIAL_INDICES[@]}" -gt 0 ]]; then
+    for trial in "${TRIAL_INDICES[@]}"; do
+      args="${args} --trial-index ${trial}"
+    done
+  else
+    args=" --n-trials ${N_TRIALS}"
+  fi
+
+  printf "%s" "$args"
+}
 
 common_args() {
   local graph="$1"
@@ -30,7 +47,6 @@ common_args() {
     --graph ${graph} \
     --reuse-data-root ${DATA_ROOT} \
     --n-samples ${N_SAMPLES} \
-    --n-trials ${N_TRIALS} \
     --dim ${DIM} \
     --u-size ${U_SIZE} \
     --lr 4e-3 \
@@ -60,13 +76,13 @@ common_args() {
     --selection-query-lambda 1e-4 \
     --query-update-target mask \
     --train-seed-offset ${seed} \
-    --max-query-iters 1000"
+    --max-query-iters 1000$(trial_args)"
 }
 
 graph_extra_args() {
   local graph="$1"
   case "$graph" in
-    square)
+    square|four_clique)
       printf "%s" " --var-dim W=8 --var-dim Z=8"
       ;;
     *)
@@ -113,9 +129,41 @@ run_single_graph_seed() {
   export NUMEXPR_NUM_THREADS="$CPU_THREADS_PER_JOB"
 
   echo "Worker graph=${graph} seed=${seed} gpu=${gpu} trials=0..$((N_TRIALS - 1))"
+  if [[ "${#TRIAL_INDICES[@]}" -gt 0 ]]; then
+    echo "Trial indices=${TRIAL_INDICES[*]}"
+  fi
   echo "Started at $(date)"
   ${PYTHON_BIN} $(common_args "$graph" "$seed") $(graph_extra_args "$graph")
   echo "Completed graph=${graph} seed=${seed} at $(date)"
+}
+
+run_graph_seed_sessions() {
+  local graph="$1"
+
+  if [[ "${#GPUS[@]}" -lt "${#SEEDS[@]}" ]]; then
+    echo "GPUS must have at least as many entries as SEEDS for graph-seeds mode" >&2
+    exit 2
+  fi
+
+  cd "$ROOT_DIR"
+  mkdir -p logs
+
+  local i seed gpu session log
+  for i in "${!SEEDS[@]}"; do
+    seed="${SEEDS[$i]}"
+    gpu="${GPUS[$i]}"
+    session="${SEED_GPU_PREFIX}_${graph}_seed${seed}_gpu${gpu}"
+    log="logs/${session}.log"
+
+    if tmux has-session -t "$session" 2>/dev/null; then
+      echo "[skip] tmux session exists: $session"
+      continue
+    fi
+
+    echo "[launch] session=${session} graph=${graph} seed=${seed} gpu=${gpu} log=${log}"
+    tmux new-session -d -s "$session" \
+      "bash '$0' graph-seed-worker '$graph' '$seed' '$gpu' 2>&1 | tee '$log'; status=\${PIPESTATUS[0]}; echo; echo '[exit status]' \$status; exec bash"
+  done
 }
 
 run_seed_session() {
@@ -209,6 +257,13 @@ case "$MODE" in
       launch_seed_session "$seed"
     done
     ;;
+  launch-graph-seeds)
+    if [[ "$#" -ne 2 ]]; then
+      echo "usage: $0 launch-graph-seeds GRAPH" >&2
+      exit 2
+    fi
+    run_graph_seed_sessions "$2"
+    ;;
   worker)
     run_graph_sequence "$2"
     ;;
@@ -219,7 +274,7 @@ case "$MODE" in
     run_single_graph_seed "$2" "$3" "$4"
     ;;
   *)
-    echo "usage: $0 [smoke|launch|launch-seeds|worker GRAPH|seed-worker SEED|graph-seed-worker GRAPH SEED GPU]" >&2
+    echo "usage: $0 [smoke|launch|launch-seeds|launch-graph-seeds GRAPH|worker GRAPH|seed-worker SEED|graph-seed-worker GRAPH SEED GPU]" >&2
     exit 2
     ;;
 esac

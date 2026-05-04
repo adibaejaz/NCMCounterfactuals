@@ -109,6 +109,9 @@ parser.add_argument("--bound-outcome", default="Y", help="outcome variable for b
 parser.add_argument("--bound-outcome-value", type=int, default=1, help="outcome value for bound experiments")
 parser.add_argument("--bound-treatment-value", action="append", type=int, default=[],
                     help="treatment value for bound experiments; may be repeated")
+parser.add_argument("--bound-do-json",
+                    help="JSON object for a joint bound intervention, e.g. '{\"sort\":0,\"saatid\":0}'. "
+                         "Overrides --bound-treatment/--bound-treatment-value in bound mode.")
 parser.add_argument("--id-reruns", type=int, default=1, help="number of min-max reruns")
 parser.add_argument("--train-seed-offset", type=int, default=0,
                     help="offset added to min-max model initialization seeds without changing data seeds")
@@ -359,26 +362,61 @@ def _parse_non_collider_triples(specs):
     return triples
 
 
+def _parse_bound_do_json(value):
+    if value is None:
+        return None
+    raw = json.loads(value)
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("--bound-do-json must decode to a non-empty object")
+
+    bound_do = {}
+    for var, assignment in raw.items():
+        if not isinstance(var, str) or not var:
+            raise ValueError("--bound-do-json keys must be non-empty variable names")
+        if not isinstance(assignment, int):
+            raise ValueError("--bound-do-json values must be integers")
+        bound_do[var] = int(assignment)
+    return bound_do
+
+
+def _format_do_assignment(treatment_event):
+    return ", ".join("{}={}".format(var, treatment_event[var]) for var in sorted(treatment_event))
+
+
+def _bound_do_label(bound_do):
+    return "_".join("{}{}".format(var, bound_do[var]) for var in sorted(bound_do))
+
+
 def _build_bound_queries(graph_name, treatment_var, treatment_value, outcome_var, outcome_value):
+    return _build_bound_query_for_event(
+        graph_name,
+        {treatment_var: treatment_value},
+        outcome_var,
+        outcome_value,
+    )
+
+
+def _build_bound_query_for_event(graph_name, treatment_event, outcome_var, outcome_value):
+    treatment_event = dict(treatment_event)
+    do_assignment = _format_do_assignment(treatment_event)
     eval_query = CTF(
-        {CTFTerm({outcome_var}, {treatment_var: treatment_value}, {outcome_var: outcome_value})},
+        {CTFTerm({outcome_var}, treatment_event, {outcome_var: outcome_value})},
         set(),
-        name="P({}={} | do({}={}))".format(outcome_var, outcome_value, treatment_var, treatment_value),
+        name="P({}={} | do({}))".format(outcome_var, outcome_value, do_assignment),
     )
     opt_query = (
         eval_query,
         CTF(
-            {CTFTerm({outcome_var}, {treatment_var: treatment_value}, {outcome_var: 1 - outcome_value})},
+            {CTFTerm({outcome_var}, treatment_event, {outcome_var: 1 - outcome_value})},
             set(),
-            name="P({}={} | do({}={}))".format(outcome_var, 1 - outcome_value, treatment_var, treatment_value),
+            name="P({}={} | do({}))".format(outcome_var, 1 - outcome_value, do_assignment),
         ),
     )
     query_bounds = {
         "graph_name": graph_name,
         "outcome_var": outcome_var,
         "outcome_value": outcome_value,
-        "treatment_var": treatment_var,
-        "treatment_values": (treatment_value,),
+        "treatment_events": [treatment_event],
     }
     return eval_query, opt_query, query_bounds
 
@@ -417,9 +455,10 @@ def _dimension_label(dim, v_sizes=None):
     return "{}-v{}".format(dim, "_".join(parts))
 
 
-def _generated_dataset_dir(root_dir, graph, n, dim, trial_index, v_sizes=None):
-    return Path(root_dir) / "graph={}-n_samples={}-dim={}-trial_index={}".format(
-        graph, n, _dimension_label(dim, v_sizes), trial_index)
+def _generated_dataset_dir(root_dir, graph, n, dim, trial_index, v_sizes=None, bound_do_label=None):
+    query_part = "-bound_do={}".format(bound_do_label) if bound_do_label else ""
+    return Path(root_dir) / "graph={}-n_samples={}-dim={}{}-trial_index={}".format(
+        graph, n, _dimension_label(dim, v_sizes), query_part, trial_index)
 
 
 def _load_generated_data_bundle(source_path, graph, n, dim, hyperparams):
@@ -470,6 +509,13 @@ def main():
     bound_mode = args.bound_query
     query_track = args.query_track.lower() if args.query_track is not None and not bound_mode else None
     bound_query_track = args.bound_query_track.lower() if args.bound_query_track is not None else None
+    bound_do = _parse_bound_do_json(args.bound_do_json)
+    if bound_do is not None and not bound_mode:
+        raise ValueError("--bound-do-json requires --bound-query")
+    if bound_do is not None and bound_query_track is not None:
+        raise ValueError("--bound-do-json cannot be combined with --bound-query-track")
+    if bound_do is not None and args.bound_treatment_value:
+        raise ValueError("--bound-do-json cannot be combined with --bound-treatment-value")
     if bound_mode and graph_choice == "barley":
         if args.bound_treatment == "X":
             args.bound_treatment = "sort"
@@ -500,6 +546,9 @@ def main():
     assert not args.dag_alm or args.cycle_penalty == "notears"
     assert args.mask_non_collider_lambda >= 0
     assert args.mask_fit_loss_weight >= 0
+    if bound_do is not None and args.bound_outcome in bound_do:
+        raise ValueError("--bound-do-json cannot intervene on the outcome variable {}".format(
+            args.bound_outcome))
 
     pipeline = MaskedDivergencePipeline
     dat_model = valid_generators[gen_choice]
@@ -590,6 +639,8 @@ def main():
         'mc-sample-size': args.mc_sample_size,
         'query-update-target': args.query_update_target,
     }
+    if bound_do is not None:
+        hyperparams['bound-do'] = dict(bound_do)
     if args.theta_only_extra_epochs > 0:
         hyperparams['theta-only-extra-epochs'] = args.theta_only_extra_epochs
         hyperparams['theta-only-final-query-reg'] = args.theta_only_final_query_reg
@@ -600,7 +651,9 @@ def main():
         if bound_mode:
             required_vars = (
                 {"X", "Y"} if bound_query_track is not None
-                else {args.bound_treatment, args.bound_outcome}
+                else (set(bound_do) | {args.bound_outcome}
+                      if bound_do is not None
+                      else {args.bound_treatment, args.bound_outcome})
             )
             graph_set = {
                 graph for graph in graph_sets[graph_choice]
@@ -612,7 +665,9 @@ def main():
         if bound_mode:
             required_vars = (
                 {"X", "Y"} if bound_query_track is not None
-                else {args.bound_treatment, args.bound_outcome}
+                else (set(bound_do) | {args.bound_outcome}
+                      if bound_do is not None
+                      else {args.bound_treatment, args.bound_outcome})
             )
             if not _graph_has_vars(graph_choice, required_vars):
                 raise ValueError("graph {} does not contain {}".format(
@@ -680,6 +735,15 @@ def main():
             if bound_query_track is not None:
                 eval_query, opt_queries = get_query(graph, bound_query_track)
                 query_jobs = [(eval_query, opt_queries, None)]
+            elif bound_do is not None:
+                query_jobs = [
+                    _build_bound_query_for_event(
+                        graph,
+                        bound_do,
+                        args.bound_outcome,
+                        args.bound_outcome_value,
+                    )
+                ]
             else:
                 query_jobs = [
                     _build_bound_queries(
@@ -740,8 +804,19 @@ def main():
                     if args.reuse_data_from or args.reuse_data_root:
                         source_path = args.reuse_data_from
                         if args.reuse_data_root:
+                            bound_do_label = (
+                                _bound_do_label(bound_do)
+                                if bound_do is not None and len(bound_do) > 1
+                                else None
+                            )
                             source_path = _generated_dataset_dir(
-                                args.reuse_data_root, graph, n, d, i, hyperparams.get("v-sizes"))
+                                args.reuse_data_root,
+                                graph,
+                                n,
+                                d,
+                                i,
+                                hyperparams.get("v-sizes"),
+                                bound_do_label=bound_do_label)
                         data_bundle = _load_generated_data_bundle(
                             source_path, graph, n, d, hyperparams)
                     try:

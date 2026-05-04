@@ -579,8 +579,13 @@ def _run_trial_locked(args, trial_index, cg, do_var_list, hyperparams, out_dir, 
         print("[resume] graph={} trial={} skipping {} rejected retries from {}".format(
             args.graph, trial_index, len(rejected_retry_indices), reject_log))
 
-    for retry_index in range(args.max_retries + 1):
-        if retry_index in rejected_retry_indices:
+    if args.accept_retry_index is None:
+        retry_indices = range(args.max_retries + 1)
+    else:
+        retry_indices = [args.accept_retry_index]
+
+    for retry_index in retry_indices:
+        if args.accept_retry_index is None and retry_index in rejected_retry_indices:
             continue
 
         seed = _candidate_seed(args, trial_index, retry_index, hyperparams, do_var_list)
@@ -619,6 +624,7 @@ def _run_trial_locked(args, trial_index, cg, do_var_list, hyperparams, out_dir, 
             reject_reasons.append("adjustment_separation")
         if not positivity["passed"]:
             reject_reasons.append("positivity")
+        forced_accept = args.accept_retry_index is not None
 
         metadata = {
             "graph": args.graph,
@@ -634,7 +640,8 @@ def _run_trial_locked(args, trial_index, cg, do_var_list, hyperparams, out_dir, 
             "do_var_list": do_var_list,
             "bound_do": dict(args.bound_do),
             "bound_do_label": _bound_do_label(args.bound_do),
-            "accepted": len(reject_reasons) == 0,
+            "accepted": len(reject_reasons) == 0 or forced_accept,
+            "forced_accept": bool(forced_accept),
             "reject_reasons": reject_reasons,
             "bound_gap_min": float(args.bound_gap_min),
             "adjustment_gap_min": float(args.adjustment_gap_min),
@@ -644,7 +651,7 @@ def _run_trial_locked(args, trial_index, cg, do_var_list, hyperparams, out_dir, 
             "min_empirical_cell_count": int(args.min_empirical_cell_count),
         }
 
-        if not reject_reasons:
+        if not reject_reasons or forced_accept:
             stored_metrics = _build_stored_metrics(dat_m, dat_sets, do_var_list)
             _save_accepted(
                 out_dir=out_dir,
@@ -656,7 +663,8 @@ def _run_trial_locked(args, trial_index, cg, do_var_list, hyperparams, out_dir, 
                 bound_diagnostics=bound,
                 positivity_diagnostics=positivity,
                 adjustment_diagnostics=adjustment)
-            print("[accepted]", out_dir)
+            status = "[forced-accepted]" if forced_accept and reject_reasons else "[accepted]"
+            print(status, out_dir)
             return
 
         _append_jsonl(reject_log, {
@@ -715,6 +723,11 @@ def build_parser():
     parser.add_argument("--no-positivity", action="store_true",
                         help="do not require true/empirical joint positivity")
     parser.add_argument("--max-retries", type=int, default=1000)
+    parser.add_argument("--accept-retry-index", type=int,
+                        help=(
+                            "generate exactly this deterministic retry and save it even if "
+                            "bound/adjustment/positivity diagnostics would reject it"
+                        ))
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--lockinfo", default=os.environ.get("SLURM_JOB_ID", ""),
                         help="extra string written to lock.json, e.g. a scheduler job id")

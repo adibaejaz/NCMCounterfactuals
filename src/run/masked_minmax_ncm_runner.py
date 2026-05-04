@@ -70,6 +70,21 @@ class MaskedNCMMinMaxRunner(BaseRunner):
             gpus=gpu
         ), checkpoint
 
+    def get_latest_phase_checkpoint(self, directory, r, phase):
+        checkpoint_dir = os.path.join(directory, str(r), f"checkpoints_{phase}")
+        checkpoints = glob.glob(os.path.join(checkpoint_dir, "*.ckpt"))
+        if not checkpoints:
+            return None
+        last_ckpt = os.path.join(checkpoint_dir, "last.ckpt")
+        if os.path.isfile(last_ckpt):
+            return last_ckpt
+        return max(checkpoints, key=os.path.getmtime)
+
+    def get_checkpoint_to_load(self, checkpoint, fallback_path):
+        if checkpoint.best_model_path:
+            return checkpoint.best_model_path
+        return fallback_path
+
     def _ncm_kwargs(self, pl_model):
         return dict(
             mask=pl_model.get_mask(),
@@ -196,14 +211,24 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                 for r in range(hyperparams.get("id-reruns", 1)):
                     os.makedirs(f'{d}/{r}/', exist_ok=True)
                     if not os.path.isfile(f'{d}/{r}/best_max.th'):
-                        for file in glob.glob(f'{d}/{r}/*'):
-                            if os.path.isdir(file):
-                                shutil.rmtree(file)
-                            else:
-                                try:
-                                    os.remove(file)
-                                except FileNotFoundError:
-                                    pass
+                        resume_ckpts = {
+                            phase: self.get_latest_phase_checkpoint(d, r, phase)
+                            for phase in ("max", "min", "theta_only_max", "theta_only_min")
+                        }
+                        if any(resume_ckpts.values()):
+                            print("[resuming checkpoints]", {
+                                phase: path for phase, path in resume_ckpts.items()
+                                if path is not None
+                            })
+                        else:
+                            for file in glob.glob(f'{d}/{r}/*'):
+                                if os.path.isdir(file):
+                                    shutil.rmtree(file)
+                                else:
+                                    try:
+                                        os.remove(file)
+                                    except FileNotFoundError:
+                                        pass
 
                         rerun_start = time.perf_counter()
                         timings = {"data_setup_wall_seconds": data_setup_wall_seconds}
@@ -244,8 +269,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                             query_bounds=hyperparams.get("query-bound-spec"))
                         timings["max_initial_eval_wall_seconds"] = time.perf_counter() - max_initial_eval_start
                         max_train_start = time.perf_counter()
-                        trainer_max.fit(m_max)
-                        ckpt_max = T.load(checkpoint_max.best_model_path)
+                        trainer_max.fit(m_max, ckpt_path=resume_ckpts["max"])
+                        ckpt_max_path = self.get_checkpoint_to_load(checkpoint_max, resume_ckpts["max"])
+                        ckpt_max = T.load(ckpt_max_path)
                         m_max.load_state_dict(ckpt_max['state_dict'])
                         timings["max_train_wall_seconds"] = time.perf_counter() - max_train_start
 
@@ -258,8 +284,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                             query_bounds=hyperparams.get("query-bound-spec"))
                         timings["min_initial_eval_wall_seconds"] = time.perf_counter() - min_initial_eval_start
                         min_train_start = time.perf_counter()
-                        trainer_min.fit(m_min)
-                        ckpt_min = T.load(checkpoint_min.best_model_path)
+                        trainer_min.fit(m_min, ckpt_path=resume_ckpts["min"])
+                        ckpt_min_path = self.get_checkpoint_to_load(checkpoint_min, resume_ckpts["min"])
+                        ckpt_min = T.load(ckpt_min_path)
                         m_min.load_state_dict(ckpt_min['state_dict'])
                         timings["min_train_wall_seconds"] = time.perf_counter() - min_train_start
 
@@ -278,9 +305,11 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                                 early_stop_patience=early_stop_patience,
                                 early_stop_min_delta=early_stop_min_delta)
                             theta_only_max_train_start = time.perf_counter()
-                            trainer_max_extra.fit(m_max)
-                            if checkpoint_max_extra.best_model_path:
-                                ckpt_max = T.load(checkpoint_max_extra.best_model_path)
+                            trainer_max_extra.fit(m_max, ckpt_path=resume_ckpts["theta_only_max"])
+                            ckpt_max_extra_path = self.get_checkpoint_to_load(
+                                checkpoint_max_extra, resume_ckpts["theta_only_max"])
+                            if ckpt_max_extra_path:
+                                ckpt_max = T.load(ckpt_max_extra_path)
                                 m_max.load_state_dict(ckpt_max['state_dict'])
                             timings["theta_only_max_train_wall_seconds"] = time.perf_counter() - theta_only_max_train_start
 
@@ -293,9 +322,11 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                                 early_stop_patience=early_stop_patience,
                                 early_stop_min_delta=early_stop_min_delta)
                             theta_only_min_train_start = time.perf_counter()
-                            trainer_min_extra.fit(m_min)
-                            if checkpoint_min_extra.best_model_path:
-                                ckpt_min = T.load(checkpoint_min_extra.best_model_path)
+                            trainer_min_extra.fit(m_min, ckpt_path=resume_ckpts["theta_only_min"])
+                            ckpt_min_extra_path = self.get_checkpoint_to_load(
+                                checkpoint_min_extra, resume_ckpts["theta_only_min"])
+                            if ckpt_min_extra_path:
+                                ckpt_min = T.load(ckpt_min_extra_path)
                                 m_min.load_state_dict(ckpt_min['state_dict'])
                             timings["theta_only_min_train_wall_seconds"] = time.perf_counter() - theta_only_min_train_start
 

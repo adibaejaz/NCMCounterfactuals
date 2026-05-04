@@ -37,14 +37,47 @@ VALID_GRAPHS = {
     "gid_a", "gid_b", "gid_c", "gid_d",
     "med_c1", "med_c2",
     "expl_xm", "expl_xm_dox", "expl_xy", "expl_dox", "expl_xy_dox", "expl_my", "expl_my_dox",
+    "sachs",
 }
 
 
-def _build_bound_queries(graph_name, treatment_var, treatment_value, outcome_var, outcome_value):
+def _parse_bound_do_json(value):
+    if value is None:
+        return None
+    raw = json.loads(value)
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("--bound-do-json must be a nonempty JSON object")
+    bound_do = {}
+    for var, assignment in raw.items():
+        bound_do[str(var)] = int(assignment)
+    return bound_do
+
+
+def _format_do_name(bound_do):
+    return ", ".join("{}={}".format(var, bound_do[var]) for var in sorted(bound_do))
+
+
+def _build_bound_query(graph_name, treatment_event, outcome_var, outcome_value):
     eval_query = CTF(
-        {CTFTerm({outcome_var}, {treatment_var: treatment_value}, {outcome_var: outcome_value})},
+        {CTFTerm({outcome_var}, dict(treatment_event), {outcome_var: outcome_value})},
         set(),
-        name="P({}={} | do({}={}))".format(outcome_var, outcome_value, treatment_var, treatment_value),
+        name="P({}={} | do({}))".format(outcome_var, outcome_value, _format_do_name(treatment_event)),
+    )
+    query_bounds = {
+        "graph_name": graph_name,
+        "outcome_var": outcome_var,
+        "outcome_value": outcome_value,
+        "treatment_events": (dict(treatment_event),),
+    }
+    return eval_query, query_bounds
+
+
+def _build_bound_queries(graph_name, treatment_var, treatment_value, outcome_var, outcome_value):
+    eval_query, _ = _build_bound_query(
+        graph_name,
+        {treatment_var: treatment_value},
+        outcome_var,
+        outcome_value,
     )
     query_bounds = {
         "graph_name": graph_name,
@@ -152,6 +185,8 @@ def build_parser():
     parser.add_argument("--bound-outcome", default="Y")
     parser.add_argument("--bound-outcome-value", type=int, default=1)
     parser.add_argument("--bound-treatment-value", action="append", type=int, default=[])
+    parser.add_argument("--bound-do-json",
+                        help="joint treatment event as JSON, e.g. '{\"PKA\":0,\"PKC\":0}'")
     parser.add_argument("--n-trials", type=int, default=1)
     parser.add_argument("--trial-index", action="append", type=int, default=[])
     parser.add_argument("--id-reruns", type=int, default=1,
@@ -201,10 +236,16 @@ def main():
             args.bound_treatment = "sort"
         if args.bound_outcome == "Y":
             args.bound_outcome = "protein"
+    bound_do = _parse_bound_do_json(args.bound_do_json)
+    if bound_do is not None and not args.bound_query:
+        raise ValueError("--bound-do-json requires --bound-query")
+    if bound_do is not None and args.bound_treatment_value:
+        raise ValueError("use --bound-do-json or --bound-treatment-value, not both")
 
-    if args.bound_query and not _graph_has_vars(args.graph, {args.bound_treatment, args.bound_outcome}):
-        raise ValueError("graph {} does not contain {} and {}".format(
-            args.graph, args.bound_treatment, args.bound_outcome))
+    if args.bound_query:
+        required_vars = (set(bound_do) if bound_do is not None else {args.bound_treatment}) | {args.bound_outcome}
+        if not _graph_has_vars(args.graph, required_vars):
+            raise ValueError("graph {} does not contain {}".format(args.graph, sorted(required_vars)))
 
     runner = EnumerationNCMRunner(DivergencePipeline, VALID_GENERATORS[args.gen], FF_NCM)
     gpu_used = 0 if args.gpu is None else [int(args.gpu)]
@@ -245,20 +286,35 @@ def main():
 
     do_var_list = get_experimental_variables(args.graph)
     if args.bound_query:
-        bound_values = args.bound_treatment_value if args.bound_treatment_value else [0, 1]
-        query_jobs = [
-            _build_bound_queries(
-                args.graph,
-                args.bound_treatment,
-                treatment_value,
-                args.bound_outcome,
-                args.bound_outcome_value,
-            )
-            for treatment_value in bound_values
-        ]
+        if bound_do is not None:
+            query_jobs = [
+                _build_bound_query(
+                    args.graph,
+                    bound_do,
+                    args.bound_outcome,
+                    args.bound_outcome_value,
+                )
+            ]
+        else:
+            bound_values = args.bound_treatment_value if args.bound_treatment_value else [0, 1]
+            query_jobs = [
+                _build_bound_queries(
+                    args.graph,
+                    args.bound_treatment,
+                    treatment_value,
+                    args.bound_outcome,
+                    args.bound_outcome_value,
+                )
+                for treatment_value in bound_values
+            ]
     else:
         eval_query, _ = get_query(args.graph, args.query_track)
         query_jobs = [(eval_query, None)]
+
+    if bound_do is not None:
+        hyperparams["bound-do"] = dict(bound_do)
+    else:
+        hyperparams.pop("bound-do", None)
 
     for eval_query, query_bounds in query_jobs:
         hyperparams["do-var-list"] = do_var_list
