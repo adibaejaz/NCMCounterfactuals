@@ -325,11 +325,15 @@ class EnumerationNCMRunner(BaseRunner):
                         model.update_metrics(stored_metrics)
 
                         trainer, checkpoint = self.create_trainer(candidate_dir, gpu, hyperparams=hyperparams)
+                        resume_ckpt = self.get_latest_checkpoint(candidate_dir)
+                        if resume_ckpt is not None:
+                            print("[resuming]", candidate_dir, resume_ckpt)
                         self._sync_cuda()
                         train_start = time.perf_counter()
-                        trainer.fit(model)
+                        trainer.fit(model, ckpt_path=resume_ckpt)
                         self._sync_cuda()
-                        ckpt = T.load(checkpoint.best_model_path)
+                        ckpt_path = checkpoint.best_model_path or self.get_latest_checkpoint(candidate_dir)
+                        ckpt = T.load(ckpt_path)
                         model.load_state_dict(ckpt["state_dict"])
                         train_wall_seconds = time.perf_counter() - train_start
 
