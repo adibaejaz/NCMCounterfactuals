@@ -41,6 +41,22 @@ POOL_NONE = "none"
 POOL_ENDPOINTS = "endpoints"
 POOL_ALL_OUTPUTS = "all-outputs"
 TRIAL_LABEL_Y = -0.22
+PAPER_METHOD_LABELS = {
+    "Sampling baseline": "G-NCM",
+    "Enum baseline": "G-NCM",
+    "Do-PFN": "Do_PFN",
+    "FF-NCM": "Feed-forward\nE-NCM",
+    "FF NCM": "Feed-forward\nE-NCM",
+    "Attn-only": "Soft Attention\nE-NCM",
+    "Attn+RL": "Hard Attention\nE-NCM",
+    "RL NCM": "Hard Attention\nE-NCM",
+}
+PAPER_GRAPH_LABELS = {
+    "chain": "Chain",
+    "backdoor": "3-Clique",
+    "square": "Square",
+    "four_clique": "Kite",
+}
 
 
 def _canonical_graph(graph):
@@ -194,6 +210,30 @@ def _extract_bound_errors(results, series):
     }
 
 
+def _extract_do_pfn_series(results):
+    query = results.get("ground_truth_bounds", {}).get("query", "P(Y=1 | do(X=0))")
+    true_bounds = results.get("ground_truth_bounds", {})
+
+    true_lower = _as_float(true_bounds.get("lower"))
+    true_upper = _as_float(true_bounds.get("upper"))
+    if true_lower is None:
+        true_lower = _as_float(results.get(f"true_lower_{query}"))
+    if true_upper is None:
+        true_upper = _as_float(results.get(f"true_upper_{query}"))
+
+    ncm_min = _as_float(results.get(f"do_pfn_cts_mc_lower_{query}"))
+    ncm_max = _as_float(results.get(f"do_pfn_cts_mc_upper_{query}"))
+    if None in (true_lower, true_upper, ncm_min, ncm_max):
+        return None
+
+    return {
+        "true_lower": true_lower,
+        "true_upper": true_upper,
+        "ncm_min": ncm_min,
+        "ncm_max": ncm_max,
+    }
+
+
 def _has_numeric_child_results(run_dir):
     return any((child / "results.json").is_file() for child in run_dir.iterdir() if child.is_dir() and child.name.isdigit())
 
@@ -230,6 +270,8 @@ def load_bound_method(label, root_dir, dim, graphs, swap_inverted=False):
 
     for results_path in sorted(root.rglob("results.json")):
         rel_parts = results_path.relative_to(root).parts
+        if "misspec_clique" in rel_parts:
+            continue
         if "dags" in rel_parts:
             continue
         if not results_path.parent.name.isdigit() and _has_numeric_child_results(results_path.parent):
@@ -281,6 +323,44 @@ def load_bound_method(label, root_dir, dim, graphs, swap_inverted=False):
     return filtered_rows
 
 
+def load_do_pfn_method(label, root_dir, dim, graphs):
+    root = Path(root_dir)
+    graph_set = {_canonical_graph(graph) for graph in graphs}
+    rows = []
+
+    for results_path in sorted(root.rglob("results.json")):
+        results = _load_json(results_path)
+        series = _extract_do_pfn_series(results)
+        if series is None:
+            continue
+
+        run_dir = _result_run_dir(results_path, root)
+        graph = _canonical_graph(str(results.get("graph") or _extract_piece(run_dir, "graph=")))
+        dimension = str(results.get("dim") or _extract_piece(run_dir, "dim="))
+        if dimension != str(dim) or graph not in graph_set:
+            continue
+
+        trial = str(results.get("trial_index", _extract_piece(run_dir, "trial_index=")))
+        row = {
+            "method": label,
+            "source_kind": "do-pfn",
+            "graph": graph,
+            "dimension": dimension,
+            "trial": trial,
+            "rerun": "0",
+            "run_id": _result_run_id(run_dir),
+            "results_path": str(results_path),
+            "swapped_inverted_bounds": False,
+            **series,
+            "min_kl": math.nan,
+            "max_kl": math.nan,
+            **_extract_bound_errors({}, series),
+        }
+        rows.append(row)
+
+    return rows
+
+
 def load_rl_summary_method(label, root_dir, dim, graphs, rl_kl_key):
     if str(dim) != "1":
         return []
@@ -289,18 +369,28 @@ def load_rl_summary_method(label, root_dir, dim, graphs, rl_kl_key):
     graph_set = {_canonical_graph(graph) for graph in graphs}
     rows = []
 
-    for path in sorted(root.glob("*_run_summary.json")):
+    for path in sorted(root.rglob("*_run_summary.json")):
+        rel_parts = path.relative_to(root).parts
+        if "misspec_clique" in rel_parts:
+            continue
         data = _load_json(path)
         for item in data:
             graph = _canonical_graph(item.get("graph", path.name.removesuffix("_run_summary.json")))
             if graph not in graph_set:
                 continue
 
-            true_lower = float(item["ground_truth_bounds"]["lower"])
-            true_upper = float(item["ground_truth_bounds"]["upper"])
-            ncm_min = float(item["estimated_bounds"]["lower"])
-            ncm_max = float(item["estimated_bounds"]["upper"])
-            kl_values = item.get("kl", {}).get(rl_kl_key, {})
+            true_lower = _as_float(item["ground_truth_bounds"].get("lower"))
+            true_upper = _as_float(item["ground_truth_bounds"].get("upper"))
+            ncm_min = _as_float(item["estimated_bounds"].get("lower"))
+            ncm_max = _as_float(item["estimated_bounds"].get("upper"))
+            if None in (true_lower, true_upper, ncm_min, ncm_max):
+                print(
+                    f"Warning: skipping incomplete rl-summary row path={path} "
+                    f"trial={item.get('trial')} rerun={item.get('rerun')}"
+                )
+                continue
+            kl = item.get("kl", {})
+            kl_values = kl.get(rl_kl_key, kl)
             min_bound_error = abs(ncm_min - true_lower)
             max_bound_error = abs(true_upper - ncm_max)
             rows.append({
@@ -316,8 +406,14 @@ def load_rl_summary_method(label, root_dir, dim, graphs, rl_kl_key):
                 "true_upper": true_upper,
                 "ncm_min": ncm_min,
                 "ncm_max": ncm_max,
-                "min_kl": _as_float(kl_values.get("minimize"), default=math.nan),
-                "max_kl": _as_float(kl_values.get("maximize"), default=math.nan),
+                "min_kl": _as_float(
+                    kl_values.get("minimize", kl_values.get("minimize_sample")),
+                    default=math.nan,
+                ),
+                "max_kl": _as_float(
+                    kl_values.get("maximize", kl_values.get("maximize_sample")),
+                    default=math.nan,
+                ),
                 "min_bound_error": min_bound_error,
                 "max_bound_error": max_bound_error,
                 "avg_abs_bound_error": (min_bound_error + max_bound_error) / 2,
@@ -332,11 +428,11 @@ def parse_method_spec(value):
         kind, root = rest.split(":", 1)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            "expected LABEL=KIND:ROOT, where KIND is bound, bound-swap-inverted, or rl-summary"
+            "expected LABEL=KIND:ROOT, where KIND is bound, bound-swap-inverted, rl-summary, or do-pfn"
         ) from exc
     kind = kind.strip()
-    if kind not in {"bound", "bound-swap-inverted", "rl-summary"}:
-        raise argparse.ArgumentTypeError("method KIND must be bound, bound-swap-inverted, or rl-summary")
+    if kind not in {"bound", "bound-swap-inverted", "rl-summary", "do-pfn"}:
+        raise argparse.ArgumentTypeError("method KIND must be bound, bound-swap-inverted, rl-summary, or do-pfn")
     return label.strip(), kind, root.strip()
 
 
@@ -349,6 +445,8 @@ def load_methods(methods, dim, graphs, rl_kl_key):
             rows.extend(load_bound_method(label, root, dim, graphs, swap_inverted=True))
         elif kind == "rl-summary":
             rows.extend(load_rl_summary_method(label, root, dim, graphs, rl_kl_key))
+        elif kind == "do-pfn":
+            rows.extend(load_do_pfn_method(label, root, dim, graphs))
     rows.sort(key=lambda row: (
         _canonical_graph(row["graph"]),
         _trial_sort_key(row["trial"]),
@@ -512,6 +610,65 @@ def plot_summary_stats(rows, graph, method_labels, output_path, title=None):
     plt.close(fig)
 
 
+def plot_paper_aggregate_bound_errors(rows, graph, method_labels, output_path, title=None):
+    graph_rows = [row for row in rows if row["graph"] == graph]
+    if not graph_rows:
+        raise ValueError(f"No rows available for graph={graph}")
+
+    methods = [method for method in method_labels if any(row["method"] == method for row in graph_rows)]
+    grouped = {method: [row for row in graph_rows if row["method"] == method] for method in methods}
+    xs = list(range(len(methods)))
+    width = 0.34
+
+    min_means = [_mean(row["min_bound_error"] for row in grouped[method]) for method in methods]
+    max_means = [_mean(row["max_bound_error"] for row in grouped[method]) for method in methods]
+    min_stds = [_std(row["min_bound_error"] for row in grouped[method]) for method in methods]
+    max_stds = [_std(row["max_bound_error"] for row in grouped[method]) for method in methods]
+    labels = [PAPER_METHOD_LABELS.get(method, method) for method in methods]
+
+    fig, ax = plt.subplots(figsize=(5.0, 5.0))
+    ax.bar(
+        [x - width / 2 for x in xs],
+        min_means,
+        yerr=min_stds,
+        width=width,
+        color="#4c78a8",
+        edgecolor="black",
+        linewidth=0.6,
+        ecolor="black",
+        capsize=3,
+        error_kw={"elinewidth": 0.8, "capthick": 0.8},
+        label="Min",
+    )
+    ax.bar(
+        [x + width / 2 for x in xs],
+        max_means,
+        yerr=max_stds,
+        width=width,
+        color="#f58518",
+        edgecolor="black",
+        linewidth=0.6,
+        ecolor="black",
+        capsize=3,
+        error_kw={"elinewidth": 0.8, "capthick": 0.8},
+        label="Max",
+    )
+
+    ax.set_title(title or PAPER_GRAPH_LABELS.get(graph, _display_graph(graph)), fontsize=12, pad=8)
+    ax.set_ylabel("Mean absolute bound error", fontsize=10)
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=7.8)
+    ax.tick_params(axis="y", labelsize=9)
+    ax.grid(axis="y", alpha=0.25, linewidth=0.7)
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(frameon=False, fontsize=9, loc="upper right")
+    fig.subplots_adjust(left=0.18, right=0.98, top=0.9, bottom=0.27)
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+
+
 def write_rows_csv(rows, output_path):
     fieldnames = [
         "method",
@@ -631,7 +788,8 @@ def main():
         dest="methods",
         help=(
             "Method source as LABEL=KIND:ROOT. KIND is bound for this repo's results.json "
-            "layout or rl-summary for Yushu *_run_summary.json files. May be repeated. "
+            "layout, rl-summary for Yushu *_run_summary.json files, or do-pfn for Do-PFN "
+            "confidence interval results. May be repeated. "
             "Use KIND=bound-swap-inverted to swap min/max values within any run where max < min. "
             "Defaults to RL NCM, FF NCM, and Sampling baseline."
         ),
@@ -671,6 +829,11 @@ def main():
         type=int,
         default=3,
         help="Expected number of reruns per graph/method for warnings. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--paper-aggregate-plots",
+        action="store_true",
+        help="Also save square paper-style grouped bar plots of aggregate min/max bound error.",
     )
     args = parser.parse_args()
 
@@ -715,6 +878,10 @@ def main():
         )
         plot_summary_stats(rows, graph, method_labels, summary_path)
         saved_paths.extend([bound_path, summary_path])
+        if args.paper_aggregate_plots:
+            paper_path = output_dir / f"paper_aggregate_bound_errors_{graph_slug}.png"
+            plot_paper_aggregate_bound_errors(rows, graph, method_labels, paper_path)
+            saved_paths.append(paper_path)
 
     for path in saved_paths:
         print(f"Saved {path}")

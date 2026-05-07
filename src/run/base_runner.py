@@ -6,7 +6,13 @@ from tempfile import NamedTemporaryFile
 from contextlib import contextmanager
 
 
-RUNTIME_ONLY_HYPERPARAMS = {"num-workers"}
+RUNTIME_ONLY_HYPERPARAMS = {
+    "num-workers",
+    "disable-tensorboard",
+    "disable-progress-bar",
+    "finalize-from-checkpoint",
+    "run-hash-override",
+}
 
 
 def _stable_jsonable(value):

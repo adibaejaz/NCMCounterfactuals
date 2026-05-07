@@ -9,5 +9,4 @@ Z -> X
 Z -> W
 W -> X
 W -> Y
-Z -> W
 X -> Y

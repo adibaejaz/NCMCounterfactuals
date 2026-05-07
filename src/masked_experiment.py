@@ -134,6 +134,18 @@ parser.add_argument("--theta-only-extra-lr", type=float, default=None,
 parser.add_argument("--no-theta-only-final-query-reg", dest="theta_only_final_query_reg",
                     action="store_false", default=True,
                     help="do not include the query regularizer during theta-only extra epochs")
+parser.add_argument("--skip-pretrain-metrics", action="store_true",
+                    help="skip expensive pre-training monitoring metrics in masked min-max runs")
+parser.add_argument("--skip-true-bound-metrics", action="store_true",
+                    help="skip recomputing true analytical/adjustment bound metrics during masked min-max evaluation")
+parser.add_argument("--disable-tensorboard", action="store_true",
+                    help="disable TensorBoard event logging during masked min-max training")
+parser.add_argument("--disable-progress-bar", action="store_true",
+                    help="disable Lightning progress bars during masked min-max training")
+parser.add_argument("--finalize-from-checkpoint", action="store_true",
+                    help="load the latest masked min/max checkpoints, skip training, and write final metrics/artifacts")
+parser.add_argument("--run-hash-override",
+                    help="advanced recovery option: force the run hash suffix for an existing output directory")
 parser.add_argument("--reuse-data-from",
                     help="path to one generated dataset directory or dat.th file to reuse")
 parser.add_argument("--reuse-data-root",
@@ -638,6 +650,12 @@ def main():
         ),
         'mc-sample-size': args.mc_sample_size,
         'query-update-target': args.query_update_target,
+        'skip-pretrain-metrics': args.skip_pretrain_metrics,
+        'skip-true-bound-metrics': args.skip_true_bound_metrics,
+        'disable-tensorboard': args.disable_tensorboard,
+        'disable-progress-bar': args.disable_progress_bar,
+        'finalize-from-checkpoint': args.finalize_from_checkpoint,
+        'run-hash-override': args.run_hash_override,
     }
     if bound_do is not None:
         hyperparams['bound-do'] = dict(bound_do)

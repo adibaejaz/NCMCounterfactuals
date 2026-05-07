@@ -41,7 +41,8 @@ class MaskedNCMMinMaxRunner(BaseRunner):
         super().__init__(pipeline, dat_model, ncm_model)
 
     def create_trainer(self, directory, max_epochs, r, gpu=None, phase=None,
-                       early_stop_patience=100, early_stop_min_delta=1e-6):
+                       early_stop_patience=100, early_stop_min_delta=1e-6,
+                       enable_tensorboard=True, enable_progress_bar=True):
         checkpoint_dir = f'{directory}/{r}/checkpoints/'
         if phase is not None:
             checkpoint_dir = f'{directory}/{r}/checkpoints_{phase}/'
@@ -51,6 +52,7 @@ class MaskedNCMMinMaxRunner(BaseRunner):
             mode="min",
             save_last=True,
         )
+        logger = pl.loggers.TensorBoardLogger(f'{directory}/{r}/logs/') if enable_tensorboard else False
         return pl.Trainer(
             callbacks=[
                 SelectionLossCallback(),
@@ -64,8 +66,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
             ],
             max_epochs=max_epochs,
             accumulate_grad_batches=1,
-            logger=pl.loggers.TensorBoardLogger(f'{directory}/{r}/logs/'),
+            logger=logger,
             log_every_n_steps=1,
+            enable_progress_bar=enable_progress_bar,
             terminate_on_nan=True,
             gpus=gpu
         ), checkpoint
@@ -84,6 +87,39 @@ class MaskedNCMMinMaxRunner(BaseRunner):
         if checkpoint.best_model_path:
             return checkpoint.best_model_path
         return fallback_path
+
+    def get_final_phase_checkpoint(self, resume_ckpts, bound):
+        if bound == "max":
+            return resume_ckpts.get("theta_only_max") or resume_ckpts.get("max")
+        if bound == "min":
+            return resume_ckpts.get("theta_only_min") or resume_ckpts.get("min")
+        raise ValueError("unknown bound {}".format(bound))
+
+    def load_model_checkpoint(self, model, ckpt_path):
+        if ckpt_path is None:
+            raise FileNotFoundError("missing checkpoint for checkpoint-only finalization")
+        ckpt = T.load(ckpt_path, map_location="cpu")
+        model.load_state_dict(ckpt["state_dict"])
+
+    def write_final_artifacts(self, directory, r, m_min, m_max, results):
+        with open(f'{directory}/{r}/results.json', 'w') as file:
+            json.dump(results, file)
+        mask_min = m_min.get_mask().detach().cpu()
+        mask_max = m_max.get_mask().detach().cpu()
+        T.save(mask_min, f'{directory}/{r}/mask_min.th')
+        T.save(mask_max, f'{directory}/{r}/mask_max.th')
+        with open(f'{directory}/{r}/mask_min.json', 'w') as file:
+            json.dump({
+                'variables': list(m_min.ncm.v),
+                'mask': mask_min.tolist(),
+            }, file)
+        with open(f'{directory}/{r}/mask_max.json', 'w') as file:
+            json.dump({
+                'variables': list(m_max.ncm.v),
+                'mask': mask_max.tolist(),
+            }, file)
+        T.save(m_min.state_dict(), f'{directory}/{r}/best_min.th')
+        T.save(m_max.state_dict(), f'{directory}/{r}/best_max.th')
 
     def _ncm_kwargs(self, pl_model):
         return dict(
@@ -135,6 +171,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
             hyperparams = dict()
         key = self.get_key(cg_file, n, dim, trial_index)
         run_key = self.get_run_key(cg_file, n, dim, trial_index, hyperparams)
+        run_hash_override = hyperparams.get("run-hash-override")
+        if run_hash_override:
+            run_key = "{}-run={}".format(key, run_hash_override)
         d = 'out/%s/%s' % (exp_name, run_key)
 
         with self.lock(f'{d}/lock', lockinfo) as acquired_lock:
@@ -208,6 +247,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                     gpu = int(T.cuda.is_available())
                 data_setup_wall_seconds = time.perf_counter() - run_start
                 stored_metrics = dict(data_bundle.stored_metrics) if data_bundle is not None else dict()
+                skip_pretrain_metrics = bool(hyperparams.get("skip-pretrain-metrics", False))
+                skip_true_bound_metrics = bool(hyperparams.get("skip-true-bound-metrics", False))
+                finalize_from_checkpoint = bool(hyperparams.get("finalize-from-checkpoint", False))
                 for r in range(hyperparams.get("id-reruns", 1)):
                     os.makedirs(f'{d}/{r}/', exist_ok=True)
                     if not os.path.isfile(f'{d}/{r}/best_max.th'):
@@ -221,6 +263,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                                 if path is not None
                             })
                         else:
+                            if finalize_from_checkpoint:
+                                raise FileNotFoundError(
+                                    "no checkpoints found for checkpoint-only finalization at {}/{}".format(d, r))
                             for file in glob.glob(f'{d}/{r}/*'):
                                 if os.path.isdir(file):
                                     shutil.rmtree(file)
@@ -248,25 +293,71 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                                               hyperparams=hyperparams, ncm_model=self.ncm_model,
                                               max_query=hyperparams.get('max-query-2', None))
 
+                        timings["model_setup_wall_seconds"] = time.perf_counter() - model_setup_start
+                        if finalize_from_checkpoint:
+                            print("\nFinalizing from checkpoints without additional training...")
+                            max_ckpt_path = self.get_final_phase_checkpoint(resume_ckpts, "max")
+                            min_ckpt_path = self.get_final_phase_checkpoint(resume_ckpts, "min")
+                            print("[finalize checkpoint max]", max_ckpt_path)
+                            print("[finalize checkpoint min]", min_ckpt_path)
+                            self.load_model_checkpoint(m_max, max_ckpt_path)
+                            self.load_model_checkpoint(m_min, min_ckpt_path)
+                            timings.update({
+                                "max_initial_eval_wall_seconds": 0.0,
+                                "min_initial_eval_wall_seconds": 0.0,
+                                "max_train_wall_seconds": 0.0,
+                                "min_train_wall_seconds": 0.0,
+                                "theta_only_max_train_wall_seconds": 0.0,
+                                "theta_only_min_train_wall_seconds": 0.0,
+                                "finalized_from_checkpoint": True,
+                            })
+
+                            final_eval_start = time.perf_counter()
+                            results = evaluation.all_metrics_minmax(
+                                m_max.generator, m_min.ncm, m_max.ncm, hyperparams["do-var-list"], dat_sets,
+                                n=100000, stored=stored_metrics, query_track=hyperparams["eval-query"],
+                                query_bounds=(
+                                    None if skip_true_bound_metrics
+                                    else hyperparams.get("query-bound-spec")),
+                                ncm_min_kwargs=self._ncm_kwargs(m_min),
+                                ncm_max_kwargs=self._ncm_kwargs(m_max))
+                            timings["final_eval_wall_seconds"] = time.perf_counter() - final_eval_start
+                            timings["rerun_total_wall_seconds"] = time.perf_counter() - rerun_start
+                            results.update(timings)
+                            print(results)
+                            self.write_final_artifacts(d, r, m_min, m_max, results)
+                            continue
+
                         early_stop_patience = int(hyperparams.get('early-stop-patience', 100))
                         early_stop_min_delta = float(hyperparams.get('early-stop-min-delta', 1e-6))
+                        enable_tensorboard = not bool(hyperparams.get('disable-tensorboard', False))
+                        enable_progress_bar = not bool(hyperparams.get('disable-progress-bar', False))
                         trainer_max, checkpoint_max = self.create_trainer(
                             d, hyperparams.get('max-query-iters', 3000), r, gpu, phase='max',
                             early_stop_patience=early_stop_patience,
-                            early_stop_min_delta=early_stop_min_delta)
+                            early_stop_min_delta=early_stop_min_delta,
+                            enable_tensorboard=enable_tensorboard,
+                            enable_progress_bar=enable_progress_bar)
                         trainer_min, checkpoint_min = self.create_trainer(
                             d, hyperparams.get('max-query-iters', 3000), r, gpu, phase='min',
                             early_stop_patience=early_stop_patience,
-                            early_stop_min_delta=early_stop_min_delta)
-                        timings["model_setup_wall_seconds"] = time.perf_counter() - model_setup_start
+                            early_stop_min_delta=early_stop_min_delta,
+                            enable_tensorboard=enable_tensorboard,
+                            enable_progress_bar=enable_progress_bar)
 
                         print("\nTraining max model...")
                         max_initial_eval_start = time.perf_counter()
-                        stored_metrics = self.print_metrics(
-                            m_max, hyperparams['do-var-list'], dat_sets,
-                            verbose=verbose, stored_metrics=stored_metrics,
-                            query_track=hyperparams["eval-query"],
-                            query_bounds=hyperparams.get("query-bound-spec"))
+                        if skip_pretrain_metrics:
+                            print("Skipping pre-training metrics.")
+                            m_max.update_metrics(stored_metrics)
+                        else:
+                            stored_metrics = self.print_metrics(
+                                m_max, hyperparams['do-var-list'], dat_sets,
+                                verbose=verbose, stored_metrics=stored_metrics,
+                                query_track=hyperparams["eval-query"],
+                                query_bounds=(
+                                    None if skip_true_bound_metrics
+                                    else hyperparams.get("query-bound-spec")))
                         timings["max_initial_eval_wall_seconds"] = time.perf_counter() - max_initial_eval_start
                         max_train_start = time.perf_counter()
                         trainer_max.fit(m_max, ckpt_path=resume_ckpts["max"])
@@ -277,11 +368,17 @@ class MaskedNCMMinMaxRunner(BaseRunner):
 
                         print("\nTraining min model...")
                         min_initial_eval_start = time.perf_counter()
-                        stored_metrics = self.print_metrics(
-                            m_min, hyperparams['do-var-list'], dat_sets,
-                            verbose=verbose, stored_metrics=stored_metrics,
-                            query_track=hyperparams["eval-query"],
-                            query_bounds=hyperparams.get("query-bound-spec"))
+                        if skip_pretrain_metrics:
+                            print("Skipping pre-training metrics.")
+                            m_min.update_metrics(stored_metrics)
+                        else:
+                            stored_metrics = self.print_metrics(
+                                m_min, hyperparams['do-var-list'], dat_sets,
+                                verbose=verbose, stored_metrics=stored_metrics,
+                                query_track=hyperparams["eval-query"],
+                                query_bounds=(
+                                    None if skip_true_bound_metrics
+                                    else hyperparams.get("query-bound-spec")))
                         timings["min_initial_eval_wall_seconds"] = time.perf_counter() - min_initial_eval_start
                         min_train_start = time.perf_counter()
                         trainer_min.fit(m_min, ckpt_path=resume_ckpts["min"])
@@ -303,7 +400,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                             trainer_max_extra, checkpoint_max_extra = self.create_trainer(
                                 d, theta_only_extra_epochs, r, gpu, phase='theta_only_max',
                                 early_stop_patience=early_stop_patience,
-                                early_stop_min_delta=early_stop_min_delta)
+                                early_stop_min_delta=early_stop_min_delta,
+                                enable_tensorboard=enable_tensorboard,
+                                enable_progress_bar=enable_progress_bar)
                             theta_only_max_train_start = time.perf_counter()
                             trainer_max_extra.fit(m_max, ckpt_path=resume_ckpts["theta_only_max"])
                             ckpt_max_extra_path = self.get_checkpoint_to_load(
@@ -320,7 +419,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                             trainer_min_extra, checkpoint_min_extra = self.create_trainer(
                                 d, theta_only_extra_epochs, r, gpu, phase='theta_only_min',
                                 early_stop_patience=early_stop_patience,
-                                early_stop_min_delta=early_stop_min_delta)
+                                early_stop_min_delta=early_stop_min_delta,
+                                enable_tensorboard=enable_tensorboard,
+                                enable_progress_bar=enable_progress_bar)
                             theta_only_min_train_start = time.perf_counter()
                             trainer_min_extra.fit(m_min, ckpt_path=resume_ckpts["theta_only_min"])
                             ckpt_min_extra_path = self.get_checkpoint_to_load(
@@ -334,7 +435,9 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                         results = evaluation.all_metrics_minmax(
                             m_max.generator, m_min.ncm, m_max.ncm, hyperparams["do-var-list"], dat_sets,
                             n=100000, stored=stored_metrics, query_track=hyperparams["eval-query"],
-                            query_bounds=hyperparams.get("query-bound-spec"),
+                            query_bounds=(
+                                None if skip_true_bound_metrics
+                                else hyperparams.get("query-bound-spec")),
                             ncm_min_kwargs=self._ncm_kwargs(m_min),
                             ncm_max_kwargs=self._ncm_kwargs(m_max))
                         timings["final_eval_wall_seconds"] = time.perf_counter() - final_eval_start
@@ -342,24 +445,7 @@ class MaskedNCMMinMaxRunner(BaseRunner):
                         results.update(timings)
                         print(results)
 
-                        with open(f'{d}/{r}/results.json', 'w') as file:
-                            json.dump(results, file)
-                        mask_min = m_min.get_mask().detach().cpu()
-                        mask_max = m_max.get_mask().detach().cpu()
-                        T.save(mask_min, f'{d}/{r}/mask_min.th')
-                        T.save(mask_max, f'{d}/{r}/mask_max.th')
-                        with open(f'{d}/{r}/mask_min.json', 'w') as file:
-                            json.dump({
-                                'variables': list(m_min.ncm.v),
-                                'mask': mask_min.tolist(),
-                            }, file)
-                        with open(f'{d}/{r}/mask_max.json', 'w') as file:
-                            json.dump({
-                                'variables': list(m_max.ncm.v),
-                                'mask': mask_max.tolist(),
-                            }, file)
-                        T.save(m_min.state_dict(), f'{d}/{r}/best_min.th')
-                        T.save(m_max.state_dict(), f'{d}/{r}/best_max.th')
+                        self.write_final_artifacts(d, r, m_min, m_max, results)
                     else:
                         print("Done with run {}".format(r))
 
